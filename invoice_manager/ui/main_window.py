@@ -10,7 +10,7 @@ from invoice_manager.services.export_excel import export_monthly_invoice_list
 from invoice_manager.ui.import_window import ImportWindow
 from invoice_manager.ui.invoice_list_window import InvoiceListWindow
 from invoice_manager.ui.work_type_master_window import WorkTypeMasterWindow
-from invoice_manager.utils.date_utils import billing_month_candidates, format_billing_month, validate_billing_month
+from invoice_manager.utils.date_utils import format_billing_month, validate_billing_month
 
 
 DEFAULT_DIGITAL_BILLDER_URL = "https://digitalbillder.com/"
@@ -90,12 +90,8 @@ class MainWindow:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        months = set(list_billing_months())
-        for month in list(months):
-            months.update(billing_month_candidates(month, before=1, after=3))
-        if not months:
-            months.update(billing_month_candidates())
-        options = {format_billing_month(month): month for month in sorted(months, reverse=True)}
+        months = list_billing_months()
+        options = {format_billing_month(month): month for month in months}
         selected = tk.StringVar(value=next(iter(options.keys()), ""))
 
         tk.Label(dialog, text="出力する請求月").pack(anchor=tk.W, padx=12, pady=(12, 4))

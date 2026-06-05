@@ -16,7 +16,6 @@ from invoice_manager.repositories import (
 )
 from invoice_manager.ui.invoice_detail_window import InvoiceDetailWindow
 from invoice_manager.utils.date_utils import (
-    billing_month_candidates,
     format_billing_month,
     format_invoice_date,
     validate_billing_month,
@@ -137,13 +136,11 @@ class InvoiceListWindow(tk.Toplevel):
             self.vendor_options[row["vendor_name"]] = int(row["id"])
 
     def load_month_options(self) -> None:
-        months = set(list_billing_months())
-        for month in list(months):
-            months.update(billing_month_candidates(month, before=1, after=3))
-        if not months:
-            months.update(billing_month_candidates())
+        months = list_billing_months(include_blank=True)
         self.month_options = {"すべて": None}
-        for month in sorted(months, reverse=True):
+        if "" in months:
+            self.month_options["未設定"] = "__blank__"
+        for month in sorted((month for month in months if month), reverse=True):
             self.month_options[format_billing_month(month)] = month
 
     def load_invoice_date_options(self) -> None:
@@ -222,7 +219,9 @@ class InvoiceListWindow(tk.Toplevel):
             filters["vendor_id"] = str(vendor_id)
         selected_month = self.selected_month_var.get()
         billing_month = self.month_options.get(selected_month)
-        if billing_month:
+        if billing_month == "__blank__":
+            filters["billing_month_blank"] = "1"
+        elif billing_month:
             filters["billing_month"] = billing_month
         invoice_date_from = self.invoice_date_options.get(self.selected_date_from_var.get())
         invoice_date_to = self.invoice_date_options.get(self.selected_date_to_var.get())

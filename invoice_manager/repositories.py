@@ -116,15 +116,13 @@ def list_projects() -> list:
         )
 
 
-def list_billing_months() -> list[str]:
+def list_billing_months(include_blank: bool = False) -> list[str]:
+    blank_condition = "" if include_blank else "WHERE COALESCE(billing_month, '') <> ''"
     with get_connection() as conn:
         rows = conn.execute(
-            """
-            SELECT billing_month FROM invoices
-            WHERE COALESCE(billing_month, '') <> ''
-            UNION
-            SELECT billing_month FROM import_batches
-            WHERE COALESCE(billing_month, '') <> ''
+            f"""
+            SELECT DISTINCT billing_month FROM invoices
+            {blank_condition}
             ORDER BY billing_month DESC
             """
         ).fetchall()
@@ -338,6 +336,8 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
     if vendor_id and vendor_id.lower() != "all":
         where.append("invoices.vendor_id = ?")
         params.append(int(vendor_id))
+    if _filter_text(filters.get("billing_month_blank")):
+        where.append("COALESCE(invoices.billing_month, '') = ''")
     for key, column in like_mapping.items():
         value = _filter_text(filters.get(key))
         if value:
