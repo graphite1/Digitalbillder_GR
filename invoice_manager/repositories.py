@@ -6,6 +6,7 @@ from pathlib import Path
 from invoice_manager.db import get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.utils.date_utils import parse_invoice_date, validate_billing_month
+from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES
 
 
 def now_text() -> str:
@@ -458,12 +459,16 @@ def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> 
 
 def list_work_type_codes(project_id: int | None = None, active_only: bool = False) -> list:
     where = []
-    params: list[int] = []
+    params: list[int | str] = []
     if project_id:
         where.append("project_id = ?")
         params.append(int(project_id))
     if active_only:
         where.append("is_active = 1")
+    catalog_codes = [code for code, _name in WORK_TYPE_CODE_CATALOG]
+    placeholders = ",".join("?" for _code in catalog_codes)
+    where.append(f"work_type_codes.code IN ({placeholders})")
+    params.extend(catalog_codes)
     sql = """
         SELECT work_type_codes.*, projects.project_code, projects.project_name
         FROM work_type_codes
@@ -484,6 +489,10 @@ def save_work_type_code(
     is_active: int = 1,
     work_type_code_id: int | None = None,
 ) -> int:
+    code = code.strip()
+    name = WORK_TYPE_CODE_NAMES.get(code, "")
+    if not name:
+        raise ValueError("工種コードは指定の一覧から選択してください。")
     timestamp = now_text()
     with get_connection() as conn:
         if work_type_code_id:

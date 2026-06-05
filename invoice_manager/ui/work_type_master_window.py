@@ -4,6 +4,12 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import list_projects, list_work_type_codes, save_work_type_code
+from invoice_manager.work_type_catalog import (
+    WORK_TYPE_CODE_CATALOG,
+    WORK_TYPE_CODE_NAMES,
+    WORK_TYPE_CODE_ORDERS,
+    work_type_label,
+)
 
 
 class WorkTypeMasterWindow(tk.Toplevel):
@@ -13,7 +19,9 @@ class WorkTypeMasterWindow(tk.Toplevel):
         self.geometry("820x520")
         self.project_options: dict[str, int] = {}
         self.work_type_ids: dict[str, int] = {}
+        self.catalog_options = {work_type_label(code, name): (code, name) for code, name in WORK_TYPE_CODE_CATALOG}
         self.selected_project_var = tk.StringVar()
+        self.selected_catalog_var = tk.StringVar()
         self.code_var = tk.StringVar()
         self.name_var = tk.StringVar()
         self.sort_order_var = tk.StringVar(value="0")
@@ -46,10 +54,22 @@ class WorkTypeMasterWindow(tk.Toplevel):
         project_combo.grid(row=0, column=1, columnspan=5, sticky=tk.W, padx=4)
         project_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
-        labels = [("工種コード", self.code_var, 12), ("工種名", self.name_var, 24), ("並び順", self.sort_order_var, 8)]
-        for index, (label, var, width) in enumerate(labels):
-            tk.Label(form, text=label).grid(row=1, column=index * 2, sticky=tk.W, pady=(8, 0))
-            tk.Entry(form, textvariable=var, width=width).grid(row=1, column=index * 2 + 1, sticky=tk.W, padx=4, pady=(8, 0))
+        tk.Label(form, text="工種コード").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        catalog_combo = ttk.Combobox(
+            form,
+            textvariable=self.selected_catalog_var,
+            values=list(self.catalog_options.keys()),
+            state="readonly",
+            width=32,
+        )
+        catalog_combo.grid(row=1, column=1, sticky=tk.W, padx=4, pady=(8, 0))
+        catalog_combo.bind("<<ComboboxSelected>>", self.on_catalog_selected)
+        tk.Label(form, text="工種名").grid(row=1, column=2, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(form, textvariable=self.name_var, width=24, state="readonly").grid(
+            row=1, column=3, sticky=tk.W, padx=4, pady=(8, 0)
+        )
+        tk.Label(form, text="並び順").grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
+        tk.Entry(form, textvariable=self.sort_order_var, width=8).grid(row=1, column=5, sticky=tk.W, padx=4, pady=(8, 0))
         tk.Checkbutton(form, text="有効", variable=self.is_active_var).grid(row=1, column=6, sticky=tk.W, pady=(8, 0))
 
         actions = tk.Frame(self, padx=10)
@@ -92,10 +112,23 @@ class WorkTypeMasterWindow(tk.Toplevel):
             return
         values = self.tree.item(selection[0], "values")
         self.editing_id = self.work_type_ids[selection[0]]
+        label = work_type_label(values[0], WORK_TYPE_CODE_NAMES.get(values[0], values[1]))
+        self.selected_catalog_var.set(label if label in self.catalog_options else "")
         self.code_var.set(values[0])
         self.name_var.set(values[1])
         self.sort_order_var.set(values[2])
         self.is_active_var.set(1 if values[3] == "有効" else 0)
+
+    def on_catalog_selected(self, _event=None) -> None:
+        selected = self.selected_catalog_var.get()
+        code_name = self.catalog_options.get(selected)
+        if not code_name:
+            return
+        code, name = code_name
+        self.code_var.set(code)
+        self.name_var.set(name)
+        if self.sort_order_var.get() in ("", "0"):
+            self.sort_order_var.set(str(WORK_TYPE_CODE_ORDERS[code]))
 
     def save(self) -> None:
         project_id = self.selected_project_id()
@@ -124,6 +157,7 @@ class WorkTypeMasterWindow(tk.Toplevel):
 
     def clear_form(self) -> None:
         self.editing_id = None
+        self.selected_catalog_var.set("")
         self.code_var.set("")
         self.name_var.set("")
         self.sort_order_var.set("0")
