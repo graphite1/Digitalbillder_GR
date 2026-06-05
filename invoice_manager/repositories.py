@@ -1,0 +1,728 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from invoice_manager.db import get_connection
+from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
+from invoice_manager.utils.date_utils import parse_invoice_date, validate_billing_month
+
+
+def now_text() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def add_audit_log(action: str, target_table: str | None = None, target_id: int | None = None, detail: str = "") -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_logs (target_table, target_id, action, detail, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_table, target_id, action, detail, now_text()),
+        )
+
+
+def get_app_setting(key: str) -> str:
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
+def set_app_setting(key: str, value: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, now_text()),
+        )
+
+
+def create_import_batch(
+    billing_month: str,
+    csv_path: Path,
+    zip_path: Path,
+    csv_hash: str,
+    zip_hash: str,
+    memo: str,
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO import_batches
+                (billing_month, csv_file_name, zip_file_name, csv_hash, zip_hash, imported_at, memo)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (billing_month, csv_path.name, zip_path.name, csv_hash, zip_hash, now_text(), memo),
+        )
+        return int(cur.lastrowid)
+
+
+def save_import_errors(import_batch_id: int, errors: list[ImportErrorItem]) -> None:
+    if not errors:
+        return
+    created_at = now_text()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO import_errors
+                (import_batch_id, row_number, error_type, message, raw_data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    import_batch_id,
+                    error.row_number,
+                    error.error_type,
+                    error.message,
+                    error.raw_data,
+                    created_at,
+                )
+                for error in errors
+            ],
+        )
+
+
+def get_or_create_project(project_code: str, project_name: str) -> int:
+    timestamp = now_text()
+    with get_connection() as conn:
+        row = conn.execute("SELECT id FROM projects WHERE project_code = ?", (project_code,)).fetchone()
+        if row:
+            return int(row["id"])
+        cur = conn.execute(
+            """
+            INSERT INTO projects (project_code, project_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (project_code, project_name, timestamp, timestamp),
+        )
+        return int(cur.lastrowid)
+
+
+def list_projects() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT id, project_code, project_name
+                FROM projects
+                ORDER BY project_code ASC, project_name ASC
+                """
+            ).fetchall()
+        )
+
+
+def list_billing_months() -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT billing_month FROM invoices
+            WHERE COALESCE(billing_month, '') <> ''
+            UNION
+            SELECT billing_month FROM import_batches
+            WHERE COALESCE(billing_month, '') <> ''
+            ORDER BY billing_month DESC
+            """
+        ).fetchall()
+    return [row["billing_month"] for row in rows]
+
+
+def list_invoice_dates() -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT invoice_date
+            FROM invoices
+            ORDER BY invoice_date ASC
+            """
+        ).fetchall()
+    return [row["invoice_date"] for row in rows]
+
+
+def get_or_create_vendor(vendor_name: str) -> int:
+    timestamp = now_text()
+    with get_connection() as conn:
+        row = conn.execute("SELECT id FROM vendors WHERE vendor_name = ?", (vendor_name,)).fetchone()
+        if row:
+            return int(row["id"])
+        cur = conn.execute(
+            """
+            INSERT INTO vendors (vendor_name, created_at, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (vendor_name, timestamp, timestamp),
+        )
+        return int(cur.lastrowid)
+
+
+def list_vendors() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT id, vendor_name
+                FROM vendors
+                ORDER BY vendor_name ASC
+                """
+            ).fetchall()
+        )
+
+
+def get_or_create_contact(row: InvoiceCsvRow, vendor_id: int) -> int | None:
+    if not any((row.last_name, row.first_name, row.email, row.phone)):
+        return None
+    timestamp = now_text()
+    with get_connection() as conn:
+        existing = conn.execute(
+            """
+            SELECT id FROM vendor_contacts
+            WHERE vendor_id = ?
+              AND COALESCE(last_name, '') = ?
+              AND COALESCE(first_name, '') = ?
+              AND COALESCE(email, '') = ?
+              AND COALESCE(phone, '') = ?
+            """,
+            (vendor_id, row.last_name, row.first_name, row.email, row.phone),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        cur = conn.execute(
+            """
+            INSERT INTO vendor_contacts
+                (vendor_id, last_name, first_name, email, phone, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                vendor_id,
+                row.last_name,
+                row.first_name,
+                row.email,
+                row.phone,
+                timestamp,
+                timestamp,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def find_invoice_by_external_id(external_id: str):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT
+                invoices.*,
+                projects.project_code,
+                projects.project_name,
+                vendors.vendor_name
+            FROM invoices
+            JOIN projects ON projects.id = invoices.project_id
+            JOIN vendors ON vendors.id = invoices.vendor_id
+            WHERE invoices.external_id = ?
+            """,
+            (external_id,),
+        ).fetchone()
+
+
+def find_duplicate_candidate(row: InvoiceCsvRow):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT invoices.id
+            FROM invoices
+            JOIN projects ON projects.id = invoices.project_id
+            JOIN vendors ON vendors.id = invoices.vendor_id
+            WHERE invoices.external_id <> ?
+              AND projects.project_code = ?
+              AND vendors.vendor_name = ?
+              AND invoices.invoice_date = ?
+              AND invoices.total_amount = ?
+            LIMIT 1
+            """,
+            (
+                row.external_id,
+                row.project_code,
+                row.vendor_name,
+                row.invoice_date,
+                row.total_amount,
+            ),
+        ).fetchone()
+
+
+def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int) -> int:
+    project_id = get_or_create_project(row.project_code, row.project_name)
+    vendor_id = get_or_create_vendor(row.vendor_name)
+    contact_id = get_or_create_contact(row, vendor_id)
+    timestamp = now_text()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO invoices
+                (
+                    import_batch_id, external_id, project_id, vendor_id, contact_id,
+                    invoice_date, billing_month, total_amount, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                import_batch_id,
+                row.external_id,
+                project_id,
+                vendor_id,
+                contact_id,
+                row.invoice_date,
+                billing_month,
+                row.total_amount,
+                timestamp,
+                timestamp,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def insert_invoice_file(
+    invoice_id: int,
+    original_file_name: str,
+    stored_file_path: Path,
+    file_type: str,
+    file_hash: str,
+    file_size: int,
+) -> bool:
+    with get_connection() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO invoice_files
+                    (
+                        invoice_id, original_file_name, stored_file_path, file_type,
+                        file_hash, file_size, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    invoice_id,
+                    original_file_name,
+                    str(stored_file_path),
+                    file_type,
+                    file_hash,
+                    file_size,
+                    now_text(),
+                ),
+            )
+            return True
+        except Exception:
+            return False
+
+
+def list_invoices(filters: dict[str, str] | None = None) -> list:
+    filters = filters or {}
+    where = []
+    params: list[str | int] = []
+    like_mapping = {
+        "project_name": "projects.project_name",
+        "vendor_name": "vendors.vendor_name",
+    }
+    exact_mapping = {
+        "billing_month": "invoices.billing_month",
+        "project_code": "projects.project_code",
+        "invoice_date": "invoices.invoice_date",
+    }
+    project_id = _filter_text(filters.get("project_id"))
+    if project_id and project_id.lower() != "all":
+        where.append("invoices.project_id = ?")
+        params.append(int(project_id))
+    vendor_id = _filter_text(filters.get("vendor_id"))
+    if vendor_id and vendor_id.lower() != "all":
+        where.append("invoices.vendor_id = ?")
+        params.append(int(vendor_id))
+    for key, column in like_mapping.items():
+        value = _filter_text(filters.get(key))
+        if value:
+            where.append(f"{column} LIKE ?")
+            params.append(f"%{value}%")
+    for key, column in exact_mapping.items():
+        value = _filter_text(filters.get(key))
+        if value:
+            where.append(f"{column} = ?")
+            params.append(value)
+    invoice_date_from = _filter_text(filters.get("invoice_date_from"))
+    if invoice_date_from:
+        where.append("invoices.invoice_date >= ?")
+        params.append(parse_invoice_date(invoice_date_from))
+    invoice_date_to = _filter_text(filters.get("invoice_date_to"))
+    if invoice_date_to:
+        where.append("invoices.invoice_date <= ?")
+        params.append(parse_invoice_date(invoice_date_to))
+    amount_min = _filter_text(filters.get("amount_min"))
+    if amount_min:
+        where.append("invoices.total_amount >= ?")
+        params.append(int(amount_min.replace(",", "")))
+    amount_max = _filter_text(filters.get("amount_max"))
+    if amount_max:
+        where.append("invoices.total_amount <= ?")
+        params.append(int(amount_max.replace(",", "")))
+
+    sql = """
+        SELECT
+            invoices.id,
+            invoices.external_id,
+            invoices.billing_month,
+            projects.project_code,
+            projects.project_name,
+            vendors.vendor_name,
+            COALESCE(vendor_contacts.last_name, '') || COALESCE(vendor_contacts.first_name, '') AS contact_name,
+            COALESCE(vendor_contacts.email, '') AS email,
+            COALESCE(vendor_contacts.phone, '') AS phone,
+            invoices.invoice_date,
+            invoices.total_amount,
+            COALESCE(invoices.local_memo, '') AS local_memo,
+            COUNT(invoice_files.id) AS file_count
+        FROM invoices
+        JOIN projects ON projects.id = invoices.project_id
+        JOIN vendors ON vendors.id = invoices.vendor_id
+        LEFT JOIN vendor_contacts ON vendor_contacts.id = invoices.contact_id
+        LEFT JOIN invoice_files ON invoice_files.invoice_id = invoices.id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += """
+        GROUP BY invoices.id
+        ORDER BY invoices.billing_month DESC, invoices.invoice_date DESC, invoices.id DESC
+    """
+    with get_connection() as conn:
+        return list(conn.execute(sql, params).fetchall())
+
+
+def _filter_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def list_invoice_files(invoice_id: int) -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT id, original_file_name, stored_file_path, file_type, file_size
+                FROM invoice_files
+                WHERE invoice_id = ?
+                ORDER BY id
+                """,
+                (invoice_id,),
+            ).fetchall()
+        )
+
+
+def update_invoice_memo(invoice_id: int, memo: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE invoices SET local_memo = ?, updated_at = ? WHERE id = ?",
+            (memo, now_text(), invoice_id),
+        )
+    add_audit_log("メモ変更", "invoices", invoice_id, memo)
+
+
+def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> int:
+    billing_month = validate_billing_month(billing_month)
+    ids = [int(invoice_id) for invoice_id in invoice_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    params = [billing_month, now_text(), *ids]
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE invoices
+            SET billing_month = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            params,
+        )
+    add_audit_log("請求月変更", "invoices", None, f"{billing_month}: {len(ids)}件")
+    return int(cur.rowcount)
+
+
+def list_work_type_codes(project_id: int | None = None, active_only: bool = False) -> list:
+    where = []
+    params: list[int] = []
+    if project_id:
+        where.append("project_id = ?")
+        params.append(int(project_id))
+    if active_only:
+        where.append("is_active = 1")
+    sql = """
+        SELECT work_type_codes.*, projects.project_code, projects.project_name
+        FROM work_type_codes
+        LEFT JOIN projects ON projects.id = work_type_codes.project_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY sort_order ASC, code ASC"
+    with get_connection() as conn:
+        return list(conn.execute(sql, params).fetchall())
+
+
+def save_work_type_code(
+    project_id: int,
+    code: str,
+    name: str,
+    sort_order: int = 0,
+    is_active: int = 1,
+    work_type_code_id: int | None = None,
+) -> int:
+    timestamp = now_text()
+    with get_connection() as conn:
+        if work_type_code_id:
+            conn.execute(
+                """
+                UPDATE work_type_codes
+                SET project_id = ?, code = ?, name = ?, sort_order = ?, is_active = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (project_id, code, name, sort_order, is_active, timestamp, work_type_code_id),
+            )
+            saved_id = int(work_type_code_id)
+            action = "工種コード更新"
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO work_type_codes
+                    (project_id, code, name, sort_order, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, code, name, sort_order, is_active, timestamp, timestamp),
+            )
+            saved_id = int(cur.lastrowid)
+            action = "工種コード登録"
+    add_audit_log(action, "work_type_codes", saved_id, f"{code} {name}")
+    return saved_id
+
+
+def list_invoice_allocations(invoice_id: int) -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT
+                    invoice_allocations.*,
+                    work_type_codes.code,
+                    work_type_codes.name
+                FROM invoice_allocations
+                JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+                WHERE invoice_allocations.invoice_id = ?
+                ORDER BY invoice_allocations.sort_order ASC, invoice_allocations.id ASC
+                """,
+                (invoice_id,),
+            ).fetchall()
+        )
+
+
+def save_invoice_allocation(
+    invoice_id: int,
+    work_type_code_id: int,
+    amount: int,
+    memo: str = "",
+    sort_order: int = 0,
+    allocation_id: int | None = None,
+) -> int:
+    timestamp = now_text()
+    with get_connection() as conn:
+        if allocation_id:
+            conn.execute(
+                """
+                UPDATE invoice_allocations
+                SET work_type_code_id = ?, amount = ?, memo = ?, sort_order = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (work_type_code_id, amount, memo, sort_order, timestamp, allocation_id),
+            )
+            saved_id = int(allocation_id)
+            action = "振分更新"
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO invoice_allocations
+                    (invoice_id, work_type_code_id, amount, memo, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (invoice_id, work_type_code_id, amount, memo, sort_order, timestamp, timestamp),
+            )
+            saved_id = int(cur.lastrowid)
+            action = "振分登録"
+    add_audit_log(action, "invoice_allocations", saved_id, str(amount))
+    return saved_id
+
+
+def delete_invoice_allocation(allocation_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM invoice_allocations WHERE id = ?", (allocation_id,))
+    add_audit_log("振分削除", "invoice_allocations", allocation_id, "")
+
+
+def get_invoice_allocation_total(invoice_id: int) -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM invoice_allocations WHERE invoice_id = ?",
+            (invoice_id,),
+        ).fetchone()
+    return int(row["total"])
+
+
+def list_work_type_summary(kind: str) -> list:
+    labels = {
+        "project": "projects.project_code || '｜' || projects.project_name",
+        "vendor": "vendors.vendor_name",
+        "month": "invoices.billing_month",
+    }
+    group_expr = labels[kind]
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                f"""
+                SELECT
+                    {group_expr} AS label,
+                    work_type_codes.code AS work_type_code,
+                    work_type_codes.name AS work_type_name,
+                    COUNT(DISTINCT invoices.id) AS count,
+                    SUM(invoice_allocations.amount) AS total
+                FROM invoice_allocations
+                JOIN invoices ON invoices.id = invoice_allocations.invoice_id
+                JOIN projects ON projects.id = invoices.project_id
+                JOIN vendors ON vendors.id = invoices.vendor_id
+                JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+                GROUP BY label, work_type_codes.id
+                ORDER BY label ASC, work_type_codes.sort_order ASC, work_type_codes.code ASC
+                """
+            ).fetchall()
+        )
+
+
+def list_invoice_allocation_export_rows() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT
+                    invoices.external_id,
+                    invoices.billing_month,
+                    projects.project_code,
+                    projects.project_name,
+                    vendors.vendor_name,
+                    invoices.invoice_date,
+                    invoices.total_amount,
+                    work_type_codes.code AS work_type_code,
+                    work_type_codes.name AS work_type_name,
+                    invoice_allocations.amount,
+                    COALESCE(invoice_allocations.memo, '') AS allocation_memo
+                FROM invoice_allocations
+                JOIN invoices ON invoices.id = invoice_allocations.invoice_id
+                JOIN projects ON projects.id = invoices.project_id
+                JOIN vendors ON vendors.id = invoices.vendor_id
+                JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+                ORDER BY invoices.billing_month DESC, invoices.invoice_date DESC, invoices.id DESC
+                """
+            ).fetchall()
+        )
+
+
+def get_invoice_detail(invoice_id: int):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT
+                invoices.*,
+                projects.project_code,
+                projects.project_name,
+                vendors.vendor_name,
+                vendor_contacts.last_name,
+                vendor_contacts.first_name,
+                vendor_contacts.email,
+                vendor_contacts.phone
+            FROM invoices
+            JOIN projects ON projects.id = invoices.project_id
+            JOIN vendors ON vendors.id = invoices.vendor_id
+            LEFT JOIN vendor_contacts ON vendor_contacts.id = invoices.contact_id
+            WHERE invoices.id = ?
+            """,
+            (invoice_id,),
+        ).fetchone()
+
+
+def get_summary() -> dict[str, list]:
+    with get_connection() as conn:
+        return {
+            "月別合計": list(
+                conn.execute(
+                    """
+                    SELECT billing_month AS label, COUNT(*) AS count, SUM(total_amount) AS total
+                    FROM invoices
+                    GROUP BY billing_month
+                    ORDER BY billing_month DESC
+                    """
+                )
+            ),
+            "工事別合計": list(
+                conn.execute(
+                    """
+                    SELECT projects.project_name AS label, COUNT(*) AS count, SUM(invoices.total_amount) AS total
+                    FROM invoices
+                    JOIN projects ON projects.id = invoices.project_id
+                    GROUP BY projects.id
+                    ORDER BY total DESC
+                    """
+                )
+            ),
+            "取引先別合計": list(
+                conn.execute(
+                    """
+                    SELECT vendors.vendor_name AS label, COUNT(*) AS count, SUM(invoices.total_amount) AS total
+                    FROM invoices
+                    JOIN vendors ON vendors.id = invoices.vendor_id
+                    GROUP BY vendors.id
+                    ORDER BY total DESC
+                    """
+                )
+            ),
+            "工事別・取引先別合計": list(
+                conn.execute(
+                    """
+                    SELECT
+                        projects.project_name || ' / ' || vendors.vendor_name AS label,
+                        COUNT(*) AS count,
+                        SUM(invoices.total_amount) AS total
+                    FROM invoices
+                    JOIN projects ON projects.id = invoices.project_id
+                    JOIN vendors ON vendors.id = invoices.vendor_id
+                    GROUP BY projects.id, vendors.id
+                    ORDER BY total DESC
+                    """
+                )
+            ),
+            "請求月別件数": list(
+                conn.execute(
+                    """
+                    SELECT billing_month AS label, COUNT(*) AS count, 0 AS total
+                    FROM invoices
+                    GROUP BY billing_month
+                    ORDER BY billing_month DESC
+                    """
+                )
+            ),
+            "添付PDF件数": list(
+                conn.execute(
+                    """
+                    SELECT invoices.billing_month AS label, COUNT(invoice_files.id) AS count, 0 AS total
+                    FROM invoices
+                    LEFT JOIN invoice_files ON invoice_files.invoice_id = invoices.id
+                    GROUP BY invoices.billing_month
+                    ORDER BY invoices.billing_month DESC
+                    """
+                )
+            ),
+            "工事別・工種コード別集計": list_work_type_summary("project"),
+            "取引先別・工種コード別集計": list_work_type_summary("vendor"),
+            "月別・工種コード別集計": list_work_type_summary("month"),
+        }
