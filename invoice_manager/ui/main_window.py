@@ -6,14 +6,9 @@ from tkinter import messagebox, simpledialog, ttk
 from urllib.parse import urlparse
 
 from invoice_manager.repositories import get_app_setting, list_billing_months, set_app_setting
-from invoice_manager.services.export_excel import (
-    export_invoice_allocations,
-    export_monthly_invoice_list,
-    export_work_type_summary,
-)
+from invoice_manager.services.export_excel import export_monthly_invoice_list
 from invoice_manager.ui.import_window import ImportWindow
 from invoice_manager.ui.invoice_list_window import InvoiceListWindow
-from invoice_manager.ui.summary_window import SummaryWindow
 from invoice_manager.ui.work_type_master_window import WorkTypeMasterWindow
 from invoice_manager.utils.date_utils import billing_month_candidates, format_billing_month, validate_billing_month
 
@@ -36,7 +31,7 @@ class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("請求書管理")
-        root.geometry("420x500")
+        root.geometry("420x320")
 
         frame = tk.Frame(root, padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -44,14 +39,9 @@ class MainWindow:
         buttons = [
             ("CSV + zip取込", self.open_import),
             ("請求一覧", self.open_invoice_list),
-            ("工事別集計", lambda: self.open_summary("工事別合計")),
-            ("取引先別集計", lambda: self.open_summary("取引先別合計")),
-            ("月別集計", lambda: self.open_summary("月別合計")),
             ("工種コードマスタ", self.open_work_type_master),
-            ("工種コード別集計", lambda: self.open_summary("工事別・工種コード別集計")),
             ("Digital Billderを開く", self.open_digital_billder),
             ("Excel出力", self.export_excel),
-            ("工種Excel出力", self.export_work_type_excel),
         ]
         for label, command in buttons:
             tk.Button(frame, text=label, command=command, height=2).pack(fill=tk.X, pady=4)
@@ -61,9 +51,6 @@ class MainWindow:
 
     def open_invoice_list(self) -> None:
         InvoiceListWindow(self.root)
-
-    def open_summary(self, initial_tab: str) -> None:
-        SummaryWindow(self.root, initial_tab=initial_tab)
 
     def open_work_type_master(self) -> None:
         WorkTypeMasterWindow(self.root)
@@ -77,14 +64,6 @@ class MainWindow:
             messagebox.showinfo("Excel出力", f"出力しました:\n{path}")
         except Exception as exc:
             messagebox.showerror("Excel出力エラー", str(exc))
-
-    def export_work_type_excel(self) -> None:
-        try:
-            summary_path = export_work_type_summary()
-            allocation_path = export_invoice_allocations()
-            messagebox.showinfo("工種Excel出力", f"出力しました:\n{summary_path}\n{allocation_path}")
-        except Exception as exc:
-            messagebox.showerror("工種Excel出力エラー", str(exc))
 
     def open_digital_billder(self) -> None:
         url = get_app_setting("digital_billder_url") or DEFAULT_DIGITAL_BILLDER_URL
