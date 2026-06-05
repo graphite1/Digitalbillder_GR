@@ -387,9 +387,20 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
     """
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += """
+    order_mapping = {
+        "invoice_date_desc": "invoices.invoice_date DESC, invoices.id DESC",
+        "invoice_date_asc": "invoices.invoice_date ASC, invoices.id ASC",
+        "billing_month_desc": "invoices.billing_month DESC, invoices.invoice_date DESC, invoices.id DESC",
+        "project_code_asc": "projects.project_code ASC, invoices.invoice_date DESC, invoices.id DESC",
+        "vendor_name_asc": "vendors.vendor_name ASC, invoices.invoice_date DESC, invoices.id DESC",
+        "amount_desc": "invoices.total_amount DESC, invoices.invoice_date DESC, invoices.id DESC",
+        "amount_asc": "invoices.total_amount ASC, invoices.invoice_date DESC, invoices.id DESC",
+    }
+    sort_key = _filter_text(filters.get("sort"))
+    order_by = order_mapping.get(sort_key, order_mapping["invoice_date_desc"])
+    sql += f"""
         GROUP BY invoices.id
-        ORDER BY invoices.billing_month DESC, invoices.invoice_date DESC, invoices.id DESC
+        ORDER BY {order_by}
     """
     with get_connection() as conn:
         return list(conn.execute(sql, params).fetchall())

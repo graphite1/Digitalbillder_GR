@@ -38,6 +38,16 @@ class InvoiceListWindow(tk.Toplevel):
         self.selected_date_from_var = tk.StringVar(value="すべて")
         self.selected_date_to_var = tk.StringVar(value="すべて")
         self.invoice_date_options = {"すべて": None}
+        self.selected_sort_var = tk.StringVar(value="請求日（新しい順）")
+        self.sort_options = {
+            "請求日（新しい順）": "invoice_date_desc",
+            "請求日（古い順）": "invoice_date_asc",
+            "請求月（新しい順）": "billing_month_desc",
+            "工事コード順": "project_code_asc",
+            "取引先名順": "vendor_name_asc",
+            "金額（高い順）": "amount_desc",
+            "金額（低い順）": "amount_asc",
+        }
 
         self.memo_var = tk.StringVar()
         self.load_project_options()
@@ -104,6 +114,16 @@ class InvoiceListWindow(tk.Toplevel):
         self.date_to_combo.grid(row=1, column=3, sticky=tk.W, padx=4, pady=(8, 0))
         self.date_to_combo.bind("<<ComboboxSelected>>", self.on_filter_selected)
         tk.Label(frame, text="まで").grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
+        tk.Label(frame, text="並び順").grid(row=1, column=5, sticky=tk.W, padx=(12, 0), pady=(8, 0))
+        self.sort_combo = ttk.Combobox(
+            frame,
+            textvariable=self.selected_sort_var,
+            values=list(self.sort_options.keys()),
+            width=18,
+            state="readonly",
+        )
+        self.sort_combo.grid(row=1, column=6, sticky=tk.W, padx=4, pady=(8, 0))
+        self.sort_combo.bind("<<ComboboxSelected>>", self.on_filter_selected)
 
     def load_project_options(self) -> None:
         self.project_options = {"すべて": None}
@@ -212,6 +232,9 @@ class InvoiceListWindow(tk.Toplevel):
             filters["invoice_date_from"] = invoice_date_from
         if invoice_date_to:
             filters["invoice_date_to"] = invoice_date_to
+        sort_key = self.sort_options.get(self.selected_sort_var.get())
+        if sort_key:
+            filters["sort"] = sort_key
         self.tree.delete(*self.tree.get_children())
         self.invoice_ids.clear()
         for row in list_invoices(filters):
