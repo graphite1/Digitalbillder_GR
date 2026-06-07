@@ -484,6 +484,17 @@ def list_work_type_codes(project_id: int | None = None, active_only: bool = Fals
 def ensure_work_type_codes_for_project(project_id: int) -> int:
     timestamp = now_text()
     with get_connection() as conn:
+        conn.executemany(
+            """
+            UPDATE work_type_codes
+            SET name = ?, sort_order = ?, updated_at = ?
+            WHERE project_id = ? AND code = ?
+            """,
+            [
+                (name, index, timestamp, int(project_id), code)
+                for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1)
+            ],
+        )
         cur = conn.executemany(
             """
             INSERT OR IGNORE INTO work_type_codes
