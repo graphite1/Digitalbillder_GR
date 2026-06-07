@@ -4,6 +4,14 @@ import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+try:
+    import fitz
+    from PIL import Image, ImageTk
+except Exception:
+    fitz = None
+    Image = None
+    ImageTk = None
+
 from invoice_manager.repositories import (
     delete_invoice_allocation,
     ensure_work_type_codes_for_project,
@@ -11,41 +19,96 @@ from invoice_manager.repositories import (
     get_invoice_detail,
     list_invoice_allocations,
     list_invoice_files,
+    list_recent_work_type_codes_for_project_vendor,
+    list_vendor_work_type_candidates,
     list_work_type_codes,
     save_invoice_allocation,
     update_invoice_memo,
 )
 from invoice_manager.utils.date_utils import format_billing_month
+from invoice_manager.utils.file_safety import validate_original_pdf_path
+from invoice_manager.utils.money_utils import format_amount
 
 
 class InvoiceDetailWindow(tk.Toplevel):
-    def __init__(self, master, invoice_id: int, on_saved=None) -> None:
+    def __init__(self, master, invoice_id: int, on_saved=None, invoice_ids: list[int] | None = None, current_index: int = 0) -> None:
         super().__init__(master)
         self.invoice_id = invoice_id
         self.on_saved = on_saved
+        self.invoice_ids = invoice_ids or [invoice_id]
+        self.current_index = max(0, min(current_index, len(self.invoice_ids) - 1))
         self.title("請求詳細")
-        self.geometry("920x760")
+        self.geometry("1180x820")
         self.file_ids: dict[str, str] = {}
         self.allocation_ids: dict[str, int] = {}
         self.work_type_options: dict[str, int] = {}
+        self.pdf_path: str | None = None
+        self.pdf_page_index = 0
+        self.pdf_page_count = 0
+        self.pdf_zoom = 1.0
+        self.pdf_image = None
         self.invoice_total = 0
         self.project_id: int | None = None
+        self.vendor_id: int | None = None
+        self.topmost_var = tk.IntVar(value=0)
+        self.memo_text = ""
         self._build()
         self.load()
 
     def _build(self) -> None:
-        self.info = tk.Text(self, height=10)
-        self.info.pack(fill=tk.X, padx=10, pady=10)
+        header = tk.Frame(self, padx=10, pady=8)
+        header.pack(fill=tk.X)
+        self.vendor_name_var = tk.StringVar()
+        tk.Label(header, textvariable=self.vendor_name_var, font=("", 18, "bold"), anchor=tk.W).pack(fill=tk.X)
+
+        self.info_vars = {
+            "external_id": tk.StringVar(),
+            "billing_month": tk.StringVar(),
+            "invoice_date": tk.StringVar(),
+            "total_amount": tk.StringVar(),
+            "project": tk.StringVar(),
+            "contact": tk.StringVar(),
+        }
+        info_frame = tk.Frame(header)
+        info_frame.pack(fill=tk.X, pady=(6, 0))
+        info_items = [
+            ("請求ID", "external_id"),
+            ("請求月", "billing_month"),
+            ("請求日", "invoice_date"),
+            ("請求金額", "total_amount"),
+            ("工事", "project"),
+            ("担当", "contact"),
+        ]
+        for index, (label, key) in enumerate(info_items):
+            row_index = index // 3
+            label_column = (index % 3) * 2
+            tk.Label(info_frame, text=f"{label}:", fg="#555555").grid(
+                row=row_index, column=label_column, sticky=tk.W, padx=(0, 4), pady=1
+            )
+            tk.Label(info_frame, textvariable=self.info_vars[key], anchor=tk.W).grid(
+                row=row_index, column=label_column + 1, sticky=tk.W, padx=(0, 18), pady=1
+            )
 
         action = tk.Frame(self, padx=10)
         action.pack(fill=tk.X)
-        tk.Button(action, text="メモ保存", command=self.save_memo).pack(side=tk.LEFT, padx=4)
+        tk.Button(action, text="前の請求", command=self.previous_invoice).pack(side=tk.LEFT, padx=4)
+        tk.Button(action, text="次の請求", command=self.next_invoice).pack(side=tk.LEFT, padx=4)
+        self.invoice_nav_var = tk.StringVar()
+        tk.Label(action, textvariable=self.invoice_nav_var).pack(side=tk.LEFT, padx=8)
+        tk.Button(action, text="メモを開く", command=self.open_memo_dialog).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(action, text="最前面表示", variable=self.topmost_var, command=self.toggle_topmost).pack(
+            side=tk.LEFT, padx=12
+        )
 
-        self.memo = tk.Text(self, height=3)
-        self.memo.pack(fill=tk.X, padx=10, pady=8)
+        content = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=6)
+        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        left = tk.Frame(content)
+        right = tk.Frame(content)
+        content.add(left, minsize=430)
+        content.add(right, minsize=360)
 
-        allocation_frame = tk.LabelFrame(self, text="工種コード別振分", padx=8, pady=8)
-        allocation_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        allocation_frame = tk.LabelFrame(left, text="工種コード別振分", padx=8, pady=8)
+        allocation_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.allocation_summary_var = tk.StringVar()
         tk.Label(allocation_frame, textvariable=self.allocation_summary_var).pack(anchor=tk.W)
         self.allocations = ttk.Treeview(
@@ -70,15 +133,39 @@ class InvoiceDetailWindow(tk.Toplevel):
         tk.Button(buttons, text="振分行を編集", command=self.edit_allocation).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="振分行を削除", command=self.delete_allocation).pack(side=tk.LEFT, padx=4)
 
-        files_frame = tk.LabelFrame(self, text="添付ファイル", padx=8, pady=8)
-        files_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        files_frame = tk.LabelFrame(left, text="添付ファイル", padx=8, pady=8)
+        files_frame.pack(fill=tk.BOTH, expand=True)
         self.files = ttk.Treeview(files_frame, columns=("name", "size"), show="headings", height=5)
         self.files.heading("name", text="添付ファイル一覧")
         self.files.heading("size", text="サイズ")
         self.files.column("name", width=620)
         self.files.column("size", width=100)
         self.files.pack(fill=tk.BOTH, expand=True)
+        self.files.bind("<<TreeviewSelect>>", self.on_pdf_file_selected)
         tk.Button(files_frame, text="PDFを開く", command=self.open_pdf).pack(anchor=tk.W, pady=(6, 0))
+
+        pdf_frame = tk.LabelFrame(right, text="PDFプレビュー（原本は編集しません）", padx=8, pady=8)
+        pdf_frame.pack(fill=tk.BOTH, expand=True)
+        pdf_actions = tk.Frame(pdf_frame)
+        pdf_actions.pack(fill=tk.X)
+        tk.Button(pdf_actions, text="前ページ", command=self.previous_pdf_page).pack(side=tk.LEFT, padx=2)
+        tk.Button(pdf_actions, text="次ページ", command=self.next_pdf_page).pack(side=tk.LEFT, padx=2)
+        tk.Button(pdf_actions, text="縮小", command=self.zoom_out_pdf).pack(side=tk.LEFT, padx=8)
+        tk.Button(pdf_actions, text="拡大", command=self.zoom_in_pdf).pack(side=tk.LEFT, padx=2)
+        self.pdf_status_var = tk.StringVar(value="PDF未選択")
+        tk.Label(pdf_actions, textvariable=self.pdf_status_var).pack(side=tk.LEFT, padx=8)
+
+        canvas_frame = tk.Frame(pdf_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.pdf_canvas = tk.Canvas(canvas_frame, bg="#666666")
+        pdf_y_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.pdf_canvas.yview)
+        pdf_x_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.pdf_canvas.xview)
+        self.pdf_canvas.configure(yscrollcommand=pdf_y_scrollbar.set, xscrollcommand=pdf_x_scrollbar.set)
+        self.pdf_canvas.grid(row=0, column=0, sticky=tk.NSEW)
+        pdf_y_scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        pdf_x_scrollbar.grid(row=1, column=0, sticky=tk.EW)
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
 
     def load(self) -> None:
         row = get_invoice_detail(self.invoice_id)
@@ -88,24 +175,16 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         self.invoice_total = int(row["total_amount"])
         self.project_id = int(row["project_id"])
-        self.info.delete("1.0", tk.END)
-        text = "\n".join(
-            [
-                f"請求ID: {row['external_id']}",
-                f"請求月: {format_billing_month(row['billing_month'])}",
-                f"請求日: {row['invoice_date']}",
-                f"請求金額(税込): {row['total_amount']}",
-                f"工事コード: {row['project_code']}",
-                f"工事名: {row['project_name']}",
-                f"取引先名: {row['vendor_name']}",
-                f"担当者: {row['last_name'] or ''} {row['first_name'] or ''}",
-                f"メール: {row['email'] or ''}",
-                f"電話番号: {row['phone'] or ''}",
-            ]
-        )
-        self.info.insert(tk.END, text)
-        self.memo.delete("1.0", tk.END)
-        self.memo.insert(tk.END, row["local_memo"] or "")
+        self.vendor_id = int(row["vendor_id"])
+        self.vendor_name_var.set(row["vendor_name"])
+        self.info_vars["external_id"].set(row["external_id"])
+        self.info_vars["billing_month"].set(format_billing_month(row["billing_month"]))
+        self.info_vars["invoice_date"].set(row["invoice_date"])
+        self.info_vars["total_amount"].set(f"{format_amount(row['total_amount'])}円")
+        self.info_vars["project"].set(f"{row['project_code']}｜{row['project_name']}")
+        self.info_vars["contact"].set(f"{row['last_name'] or ''} {row['first_name'] or ''}".strip())
+        self.memo_text = row["local_memo"] or ""
+        self.update_invoice_navigation()
         self.load_work_type_options()
         self.load_allocations()
         self.load_files()
@@ -115,7 +194,24 @@ class InvoiceDetailWindow(tk.Toplevel):
         if not self.project_id:
             return
         ensure_work_type_codes_for_project(self.project_id)
-        for row in list_work_type_codes(self.project_id, active_only=True):
+        recent_codes = []
+        if self.vendor_id:
+            recent_codes = list_recent_work_type_codes_for_project_vendor(self.project_id, self.vendor_id, self.invoice_id)
+        vendor_codes = []
+        if self.vendor_id:
+            vendor_codes = [row["code"] for row in list_vendor_work_type_candidates(self.vendor_id)]
+        priority_codes = recent_codes + [code for code in vendor_codes if code not in recent_codes]
+        work_type_rows = list_work_type_codes(self.project_id, active_only=True)
+        if priority_codes:
+            priority_set = set(priority_codes)
+            work_type_rows.sort(
+                key=lambda row: (
+                    priority_codes.index(row["code"]) if row["code"] in priority_set else len(priority_codes),
+                    row["sort_order"],
+                    row["code"],
+                )
+            )
+        for row in work_type_rows:
             self.work_type_options[f"{row['code']}｜{row['name']}"] = int(row["id"])
 
     def load_allocations(self) -> None:
@@ -125,7 +221,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             item_id = self.allocations.insert(
                 "",
                 tk.END,
-                values=(row["code"], row["name"], row["amount"], row["memo"] or "", row["sort_order"]),
+                values=(row["code"], row["name"], format_amount(row["amount"]), row["memo"] or "", row["sort_order"]),
             )
             self.allocation_ids[item_id] = int(row["id"])
         allocated = get_invoice_allocation_total(self.invoice_id)
@@ -143,14 +239,66 @@ class InvoiceDetailWindow(tk.Toplevel):
     def load_files(self) -> None:
         self.files.delete(*self.files.get_children())
         self.file_ids.clear()
+        first_item_id = None
         for file_row in list_invoice_files(self.invoice_id):
             item_id = self.files.insert("", tk.END, values=(file_row["original_file_name"], file_row["file_size"]))
             self.file_ids[item_id] = file_row["stored_file_path"]
+            if first_item_id is None:
+                first_item_id = item_id
+        if first_item_id:
+            self.files.selection_set(first_item_id)
+            self.files.focus(first_item_id)
+            self.show_pdf_file(self.file_ids[first_item_id])
+        else:
+            self.clear_pdf_preview("PDF添付なし")
 
     def save_memo(self) -> None:
-        update_invoice_memo(self.invoice_id, self.memo.get("1.0", tk.END).strip())
+        update_invoice_memo(self.invoice_id, self.memo_text.strip())
         if self.on_saved:
             self.on_saved()
+        self.load()
+
+    def open_memo_dialog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("メモ")
+        dialog.geometry("520x260")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        memo = tk.Text(dialog, height=8)
+        memo.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        memo.insert(tk.END, self.memo_text)
+
+        def apply() -> None:
+            self.memo_text = memo.get("1.0", tk.END).strip()
+            self.save_memo()
+            dialog.destroy()
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill=tk.X, padx=12, pady=(0, 12))
+        tk.Button(buttons, text="保存", command=apply).pack(side=tk.LEFT, padx=4)
+        tk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side=tk.LEFT, padx=4)
+        dialog.wait_window()
+
+    def toggle_topmost(self) -> None:
+        self.attributes("-topmost", bool(self.topmost_var.get()))
+
+    def update_invoice_navigation(self) -> None:
+        total = len(self.invoice_ids)
+        self.invoice_nav_var.set(f"{self.current_index + 1}/{total}件")
+
+    def previous_invoice(self) -> None:
+        if self.current_index <= 0:
+            return
+        self.current_index -= 1
+        self.invoice_id = self.invoice_ids[self.current_index]
+        self.load()
+
+    def next_invoice(self) -> None:
+        if self.current_index + 1 >= len(self.invoice_ids):
+            return
+        self.current_index += 1
+        self.invoice_id = self.invoice_ids[self.current_index]
         self.load()
 
     def add_allocation(self) -> None:
@@ -239,4 +387,72 @@ class InvoiceDetailWindow(tk.Toplevel):
         if not selection:
             messagebox.showwarning("選択なし", "PDFを選択してください。")
             return
-        os.startfile(self.file_ids[selection[0]])
+        try:
+            os.startfile(str(validate_original_pdf_path(self.file_ids[selection[0]])))
+        except Exception as exc:
+            messagebox.showerror("PDFを開けません", str(exc))
+
+    def on_pdf_file_selected(self, _event=None) -> None:
+        selection = self.files.selection()
+        if selection:
+            self.show_pdf_file(self.file_ids[selection[0]])
+
+    def show_pdf_file(self, path: str) -> None:
+        try:
+            self.pdf_path = str(validate_original_pdf_path(path))
+            self.pdf_page_index = 0
+            self.render_pdf_page()
+        except Exception as exc:
+            self.pdf_path = None
+            self.clear_pdf_preview(f"PDF表示エラー: {exc}")
+
+    def render_pdf_page(self) -> None:
+        self.pdf_canvas.delete("all")
+        if not self.pdf_path:
+            self.clear_pdf_preview("PDF未選択")
+            return
+        if fitz is None or Image is None or ImageTk is None:
+            self.clear_pdf_preview("PDF表示には PyMuPDF と Pillow が必要です")
+            return
+        try:
+            with fitz.open(self.pdf_path) as document:
+                self.pdf_page_count = document.page_count
+                if self.pdf_page_count <= 0:
+                    self.clear_pdf_preview("PDFページなし")
+                    return
+                self.pdf_page_index = max(0, min(self.pdf_page_index, self.pdf_page_count - 1))
+                page = document.load_page(self.pdf_page_index)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(self.pdf_zoom, self.pdf_zoom), alpha=False)
+                image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+                self.pdf_image = ImageTk.PhotoImage(image)
+                self.pdf_canvas.create_image(0, 0, image=self.pdf_image, anchor=tk.NW)
+                self.pdf_canvas.configure(scrollregion=(0, 0, pixmap.width, pixmap.height))
+                self.pdf_status_var.set(
+                    f"{self.pdf_page_index + 1}/{self.pdf_page_count}ページ  {int(self.pdf_zoom * 100)}%"
+                )
+        except Exception as exc:
+            self.clear_pdf_preview(f"PDF表示エラー: {exc}")
+
+    def clear_pdf_preview(self, message: str) -> None:
+        self.pdf_canvas.delete("all")
+        self.pdf_canvas.configure(scrollregion=(0, 0, 0, 0))
+        self.pdf_status_var.set(message)
+        self.pdf_image = None
+
+    def previous_pdf_page(self) -> None:
+        if self.pdf_page_index > 0:
+            self.pdf_page_index -= 1
+            self.render_pdf_page()
+
+    def next_pdf_page(self) -> None:
+        if self.pdf_page_index + 1 < self.pdf_page_count:
+            self.pdf_page_index += 1
+            self.render_pdf_page()
+
+    def zoom_in_pdf(self) -> None:
+        self.pdf_zoom = min(3.0, self.pdf_zoom + 0.25)
+        self.render_pdf_page()
+
+    def zoom_out_pdf(self) -> None:
+        self.pdf_zoom = max(0.5, self.pdf_zoom - 0.25)
+        self.render_pdf_page()

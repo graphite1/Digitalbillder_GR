@@ -5,6 +5,7 @@ from tkinter import ttk
 
 from invoice_manager.repositories import get_summary
 from invoice_manager.utils.date_utils import format_billing_month
+from invoice_manager.utils.money_utils import format_amount
 
 
 class SummaryWindow(tk.Toplevel):
@@ -32,7 +33,7 @@ class SummaryWindow(tk.Toplevel):
             tree.column("total", width=140, anchor=tk.E)
             tree.pack(fill=tk.BOTH, expand=True)
             for row in rows:
-                tree.insert("", tk.END, values=(self.format_row_label(title, row), row["count"], row["total"] or ""))
+                tree.insert("", tk.END, values=(self.format_row_label(title, row), row["count"], format_amount(row["total"])))
         self.notebook.select(selected_index)
 
     def format_row_label(self, title: str, row) -> str:

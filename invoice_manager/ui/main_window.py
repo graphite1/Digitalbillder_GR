@@ -9,6 +9,7 @@ from invoice_manager.repositories import get_app_setting, list_billing_months, s
 from invoice_manager.services.export_excel import export_monthly_invoice_list
 from invoice_manager.ui.import_window import ImportWindow
 from invoice_manager.ui.invoice_list_window import InvoiceListWindow
+from invoice_manager.ui.vendor_work_type_candidate_window import VendorWorkTypeCandidateWindow
 from invoice_manager.ui.work_type_master_window import WorkTypeMasterWindow
 from invoice_manager.utils.date_utils import format_billing_month, validate_billing_month
 
@@ -31,7 +32,7 @@ class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("請求書管理")
-        root.geometry("420x320")
+        root.geometry("420x380")
 
         frame = tk.Frame(root, padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -40,6 +41,7 @@ class MainWindow:
             ("CSV + zip取込", self.open_import),
             ("請求一覧", self.open_invoice_list),
             ("工種コードマスタ", self.open_work_type_master),
+            ("取引先別工種候補", self.open_vendor_work_type_candidates),
             ("Digital Billderを開く", self.open_digital_billder),
             ("Excel出力", self.export_excel),
         ]
@@ -54,6 +56,9 @@ class MainWindow:
 
     def open_work_type_master(self) -> None:
         WorkTypeMasterWindow(self.root)
+
+    def open_vendor_work_type_candidates(self) -> None:
+        VendorWorkTypeCandidateWindow(self.root)
 
     def export_excel(self) -> None:
         month = self.ask_billing_month()
@@ -73,6 +78,10 @@ class MainWindow:
                 return
             url = self.normalize_url(url)
             set_app_setting("digital_billder_url", url)
+        url = self.normalize_url(url)
+        if not self.is_allowed_digital_billder_url(url):
+            messagebox.showerror("URLエラー", "Digital Billder以外のURLは開けません。")
+            return
         webbrowser.open(url)
 
     def normalize_url(self, url: str) -> str:
@@ -81,6 +90,10 @@ class MainWindow:
         if not parsed.scheme:
             text = f"https://{text}"
         return text
+
+    def is_allowed_digital_billder_url(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower()
+        return hostname == "digitalbillder.com" or hostname.endswith(".digitalbillder.com")
 
     def ask_billing_month(self) -> str | None:
         result = {"value": None}

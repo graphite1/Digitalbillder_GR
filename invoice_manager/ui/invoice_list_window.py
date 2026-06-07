@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+from datetime import datetime
 from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import (
@@ -20,6 +21,8 @@ from invoice_manager.utils.date_utils import (
     format_invoice_date,
     validate_billing_month,
 )
+from invoice_manager.utils.file_safety import validate_original_pdf_path
+from invoice_manager.utils.money_utils import format_amount
 
 
 class InvoiceListWindow(tk.Toplevel):
@@ -249,7 +252,7 @@ class InvoiceListWindow(tk.Toplevel):
                     row["email"],
                     row["phone"],
                     row["invoice_date"],
-                    row["total_amount"],
+                    format_amount(row["total_amount"]),
                     row["file_count"],
                     row["local_memo"],
                 ),
@@ -292,8 +295,18 @@ class InvoiceListWindow(tk.Toplevel):
 
     def open_detail(self) -> None:
         invoice_id = self.selected_invoice_id()
-        if invoice_id:
-            InvoiceDetailWindow(self, invoice_id, on_saved=self.refresh)
+        if not invoice_id:
+            return
+        selection = self.tree.selection()
+        selected_values = self.tree.item(selection[0], "values")
+        selected_vendor = selected_values[3]
+        invoice_ids = []
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, "values")
+            if values[3] == selected_vendor:
+                invoice_ids.append(self.invoice_ids[item_id])
+        current_index = invoice_ids.index(invoice_id) if invoice_id in invoice_ids else 0
+        InvoiceDetailWindow(self, invoice_id, on_saved=self.refresh, invoice_ids=invoice_ids, current_index=current_index)
 
     def save_memo(self) -> None:
         invoice_id = self.selected_invoice_id()
@@ -323,21 +336,31 @@ class InvoiceListWindow(tk.Toplevel):
         result = {"value": None}
         dialog = tk.Toplevel(self)
         dialog.title("請求月変更")
-        dialog.geometry("280x120")
+        dialog.geometry("300x150")
         dialog.transient(self)
         dialog.grab_set()
 
-        selected = tk.StringVar()
-        labels = [label for label in self.month_options.keys() if label != "すべて"]
-        if labels:
-            selected.set(labels[0])
-        tk.Label(dialog, text="変更後の請求月").pack(anchor=tk.W, padx=12, pady=(12, 4))
-        combo = ttk.Combobox(dialog, textvariable=selected, values=labels, state="readonly")
-        combo.pack(fill=tk.X, padx=12)
+        now = datetime.now()
+        years = [str(year) for year in range(now.year - 3, now.year + 4)]
+        year_var = tk.StringVar(value=str(now.year))
+        month_var = tk.StringVar(value=str(now.month))
+
+        form = tk.Frame(dialog, padx=12, pady=12)
+        form.pack(fill=tk.X)
+        tk.Label(form, text="変更後の請求月").grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 6))
+        tk.Label(form, text="年").grid(row=1, column=0, sticky=tk.W)
+        ttk.Combobox(form, textvariable=year_var, values=years, state="readonly", width=8).grid(
+            row=1, column=1, sticky=tk.W, padx=4
+        )
+        tk.Label(form, text="月").grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+        tk.Entry(form, textvariable=month_var, width=6).grid(row=1, column=3, sticky=tk.W, padx=4)
 
         def apply() -> None:
-            if selected.get():
-                result["value"] = validate_billing_month(selected.get())
+            try:
+                result["value"] = validate_billing_month(f"{year_var.get()}-{int(month_var.get()):02d}")
+            except Exception:
+                messagebox.showwarning("入力エラー", "月は1から12の数字で入力してください。")
+                return
             dialog.destroy()
 
         buttons = tk.Frame(dialog)
@@ -355,4 +378,7 @@ class InvoiceListWindow(tk.Toplevel):
         if not files:
             messagebox.showinfo("添付なし", "添付PDFがありません。")
             return
-        os.startfile(files[0]["stored_file_path"])
+        try:
+            os.startfile(str(validate_original_pdf_path(files[0]["stored_file_path"])))
+        except Exception as exc:
+            messagebox.showerror("PDFを開けません", str(exc))

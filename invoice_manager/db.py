@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS invoice_allocations (
     FOREIGN KEY(work_type_code_id) REFERENCES work_type_codes(id)
 );
 
+CREATE TABLE IF NOT EXISTS vendor_work_type_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(vendor_id) REFERENCES vendors(id),
+    UNIQUE(vendor_id, code)
+);
+
 CREATE TABLE IF NOT EXISTS import_errors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     import_batch_id INTEGER,

@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 from invoice_manager.services.csv_reader import read_invoice_csv
 from invoice_manager.services.import_service import execute_import, preview_import
 from invoice_manager.utils.date_utils import billing_month_candidates, format_billing_month
+from invoice_manager.utils.money_utils import format_amount
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -205,15 +206,15 @@ class ImportWindow(tk.Toplevel):
             ("更新候補件数", preview.update_candidate_count),
             ("重複候補件数", preview.duplicate_candidate_count),
             ("エラー件数", preview.error_count),
-            ("請求金額合計", preview.total_amount),
+            ("請求金額合計", format_amount(preview.total_amount)),
             ("PDFファイル総数", preview.pdf_file_count),
         ]
         for name, value in rows:
             self.tree.insert("", tk.END, values=(name, value))
         for name, value in preview.project_totals.items():
-            self.tree.insert("", tk.END, values=(f"工事別合計: {name}", value))
+            self.tree.insert("", tk.END, values=(f"工事別合計: {name}", format_amount(value)))
         for name, value in preview.vendor_totals.items():
-            self.tree.insert("", tk.END, values=(f"取引先別合計: {name}", value))
+            self.tree.insert("", tk.END, values=(f"取引先別合計: {name}", format_amount(value)))
 
         self.message.delete("1.0", tk.END)
         for warning in preview.warnings:

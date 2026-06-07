@@ -7,6 +7,7 @@ from invoice_manager.db import DB_PATH, initialize_database
 from invoice_manager.services.export_excel import export_monthly_invoice_list
 from invoice_manager.services.import_service import execute_import, preview_import
 from invoice_manager.ui.main_window import run_app
+from invoice_manager.utils.money_utils import format_amount
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,14 +40,14 @@ def print_preview(preview) -> None:
     print(f"更新候補件数: {preview.update_candidate_count}")
     print(f"重複候補件数: {preview.duplicate_candidate_count}")
     print(f"エラー件数: {preview.error_count}")
-    print(f"請求金額合計: {preview.total_amount}")
+    print(f"請求金額合計: {format_amount(preview.total_amount)}")
     print(f"PDFファイル総数: {preview.pdf_file_count}")
     print("工事別合計:")
     for name, amount in preview.project_totals.items():
-        print(f"  {name}: {amount}")
+        print(f"  {name}: {format_amount(amount)}")
     print("取引先別合計:")
     for name, amount in preview.vendor_totals.items():
-        print(f"  {name}: {amount}")
+        print(f"  {name}: {format_amount(amount)}")
     if preview.warnings:
         print("警告:")
         for warning in preview.warnings:

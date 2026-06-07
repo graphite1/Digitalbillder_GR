@@ -15,6 +15,7 @@ from invoice_manager.repositories import (
     list_work_type_summary,
 )
 from invoice_manager.utils.date_utils import format_billing_month, validate_billing_month
+from invoice_manager.utils.file_safety import safe_excel_value
 
 
 HEADERS = [
@@ -127,19 +128,21 @@ def _export_rows(sheet_name: str, rows: list, output_path: Path) -> Path:
 
     for row in rows:
         ws.append(
-            [
-                format_billing_month(row["billing_month"]),
-                row["project_code"],
-                row["project_name"],
-                row["vendor_name"],
-                row["contact_name"],
-                row["email"],
-                row["phone"],
-                row["invoice_date"],
-                row["total_amount"],
-                row["file_count"],
-                row["local_memo"],
-            ]
+            _safe_excel_row(
+                [
+                    format_billing_month(row["billing_month"]),
+                    row["project_code"],
+                    row["project_name"],
+                    row["vendor_name"],
+                    row["contact_name"],
+                    row["email"],
+                    row["phone"],
+                    row["invoice_date"],
+                    row["total_amount"],
+                    row["file_count"],
+                    row["local_memo"],
+                ]
+            )
         )
 
     for index, _header in enumerate(HEADERS, start=1):
@@ -148,6 +151,8 @@ def _export_rows(sheet_name: str, rows: list, output_path: Path) -> Path:
     ws.column_dimensions["D"].width = 28
     ws.column_dimensions["F"].width = 28
     ws.column_dimensions["K"].width = 36
+    for row_index in range(2, ws.max_row + 1):
+        ws.cell(row=row_index, column=9).number_format = "#,##0"
 
     if ws.max_row > 1:
         table_ref = f"A1:{get_column_letter(len(HEADERS))}{ws.max_row}"
@@ -165,12 +170,20 @@ def _write_table(ws, headers: list[str], rows: list[list]) -> None:
     for cell in ws[1]:
         cell.font = Font(bold=True)
     for row in rows:
-        ws.append(row)
+        ws.append(_safe_excel_row(row))
     for index, header in enumerate(headers, start=1):
         ws.column_dimensions[get_column_letter(index)].width = max(14, min(36, len(header) + 8))
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            if "金額" in str(ws.cell(row=1, column=cell.column).value or ""):
+                cell.number_format = "#,##0"
     if ws.max_row > 1:
         table_ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
         table = Table(displayName=f"Table{abs(hash(ws.title))}", ref=table_ref)
         table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
         ws.add_table(table)
         ws.auto_filter.ref = table_ref
+
+
+def _safe_excel_row(row: list) -> list:
+    return [safe_excel_value(value) for value in row]

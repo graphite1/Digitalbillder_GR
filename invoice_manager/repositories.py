@@ -549,6 +549,67 @@ def save_work_type_code(
     return saved_id
 
 
+def list_vendor_work_type_candidates(vendor_id: int) -> list[dict[str, str | int]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT code, sort_order
+            FROM vendor_work_type_candidates
+            WHERE vendor_id = ?
+            ORDER BY sort_order ASC, code ASC
+            """,
+            (int(vendor_id),),
+        ).fetchall()
+    return [
+        {"code": row["code"], "name": WORK_TYPE_CODE_NAMES[row["code"]], "sort_order": row["sort_order"]}
+        for row in rows
+        if row["code"] in WORK_TYPE_CODE_NAMES
+    ]
+
+
+def save_vendor_work_type_candidates(vendor_id: int, codes: list[str]) -> int:
+    timestamp = now_text()
+    valid_codes = [code for code in codes if code in WORK_TYPE_CODE_NAMES]
+    with get_connection() as conn:
+        conn.execute("DELETE FROM vendor_work_type_candidates WHERE vendor_id = ?", (int(vendor_id),))
+        conn.executemany(
+            """
+            INSERT INTO vendor_work_type_candidates
+                (vendor_id, code, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (int(vendor_id), code, index, timestamp, timestamp)
+                for index, code in enumerate(valid_codes, start=1)
+            ],
+        )
+    add_audit_log("取引先工種候補更新", "vendors", int(vendor_id), f"{len(valid_codes)}件")
+    return len(valid_codes)
+
+
+def list_recent_work_type_codes_for_project_vendor(project_id: int, vendor_id: int, exclude_invoice_id: int) -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                work_type_codes.code,
+                MAX(invoices.invoice_date) AS latest_invoice_date,
+                MIN(invoice_allocations.sort_order) AS first_sort_order,
+                MAX(invoice_allocations.id) AS latest_allocation_id
+            FROM invoice_allocations
+            JOIN invoices ON invoices.id = invoice_allocations.invoice_id
+            JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+            WHERE invoices.project_id = ?
+              AND invoices.vendor_id = ?
+              AND invoices.id <> ?
+            GROUP BY work_type_codes.code
+            ORDER BY latest_invoice_date DESC, first_sort_order ASC, latest_allocation_id DESC
+            """,
+            (int(project_id), int(vendor_id), int(exclude_invoice_id)),
+        ).fetchall()
+    return [row["code"] for row in rows if row["code"] in WORK_TYPE_CODE_NAMES]
+
+
 def list_invoice_allocations(invoice_id: int) -> list:
     with get_connection() as conn:
         return list(

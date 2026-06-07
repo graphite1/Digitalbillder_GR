@@ -6,3 +6,9 @@ def parse_amount(value: str) -> int:
     if not text:
         raise ValueError("請求金額(税込)が空です")
     return int(text)
+
+
+def format_amount(value) -> str:
+    if value in (None, ""):
+        return ""
+    return f"{int(value):,}"
