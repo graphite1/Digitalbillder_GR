@@ -6,6 +6,7 @@ from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import (
     delete_invoice_allocation,
+    ensure_work_type_codes_for_project,
     get_invoice_allocation_total,
     get_invoice_detail,
     list_invoice_allocations,
@@ -113,6 +114,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.work_type_options = {}
         if not self.project_id:
             return
+        ensure_work_type_codes_for_project(self.project_id)
         for row in list_work_type_codes(self.project_id, active_only=True):
             self.work_type_options[f"{row['code']}｜{row['name']}"] = int(row["id"])
 

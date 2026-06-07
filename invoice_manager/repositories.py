@@ -481,6 +481,23 @@ def list_work_type_codes(project_id: int | None = None, active_only: bool = Fals
         return list(conn.execute(sql, params).fetchall())
 
 
+def ensure_work_type_codes_for_project(project_id: int) -> int:
+    timestamp = now_text()
+    with get_connection() as conn:
+        cur = conn.executemany(
+            """
+            INSERT OR IGNORE INTO work_type_codes
+                (project_id, code, name, sort_order, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            """,
+            [
+                (int(project_id), code, name, index, timestamp, timestamp)
+                for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1)
+            ],
+        )
+    return int(cur.rowcount)
+
+
 def save_work_type_code(
     project_id: int,
     code: str,

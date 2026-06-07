@@ -3,7 +3,12 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from invoice_manager.repositories import list_projects, list_work_type_codes, save_work_type_code
+from invoice_manager.repositories import (
+    ensure_work_type_codes_for_project,
+    list_projects,
+    list_work_type_codes,
+    save_work_type_code,
+)
 from invoice_manager.work_type_catalog import (
     WORK_TYPE_CODE_CATALOG,
     WORK_TYPE_CODE_NAMES,
@@ -98,6 +103,7 @@ class WorkTypeMasterWindow(tk.Toplevel):
         project_id = self.selected_project_id()
         if not project_id:
             return
+        ensure_work_type_codes_for_project(project_id)
         for row in list_work_type_codes(project_id):
             item_id = self.tree.insert(
                 "",
