@@ -6,6 +6,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import (
+    delete_invoices,
     recalculate_invoice_billing_months,
     list_billing_months,
     list_invoice_dates,
@@ -225,6 +226,8 @@ class InvoiceListWindow(tk.Toplevel):
         self.billing_month_button.pack(side=tk.LEFT, padx=4)
         self.pdf_button = tk.Button(frame, text="添付PDFを開く", command=self.open_first_pdf, state=tk.DISABLED)
         self.pdf_button.pack(side=tk.LEFT, padx=4)
+        self.delete_button = tk.Button(frame, text="選択請求を削除", command=self.delete_selected_invoices, state=tk.DISABLED)
+        self.delete_button.pack(side=tk.LEFT, padx=(12, 4))
         tk.Button(frame, text="請求月一括再計算(テスト)", command=self.recalculate_billing_months).pack(side=tk.LEFT, padx=(12, 4))
         tk.Label(frame, textvariable=self.summary_var, anchor=tk.E).pack(side=tk.RIGHT, padx=4)
 
@@ -305,6 +308,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.memo_button.configure(state=button_state)
         self.billing_month_button.configure(state=button_state)
         self.pdf_button.configure(state=button_state)
+        self.delete_button.configure(state=button_state)
         self.memo_entry.configure(state=entry_state)
 
     def selected_invoice_id(self) -> int | None:
@@ -439,3 +443,25 @@ class InvoiceListWindow(tk.Toplevel):
         self.month_combo.configure(values=list(self.month_options.keys()))
         self.refresh()
         messagebox.showinfo("請求月一括再計算", f"{updated_count}件の請求月を再計算しました。")
+
+    def delete_selected_invoices(self) -> None:
+        invoice_ids = self.selected_invoice_ids()
+        if not invoice_ids:
+            return
+        confirmed = messagebox.askyesno(
+            "請求削除",
+            f"選択した{len(invoice_ids)}件の請求データを削除します。\n添付PDFと振分データも削除されます。続けますか？",
+        )
+        if not confirmed:
+            return
+        deleted_count, failed_paths = delete_invoices(invoice_ids)
+        self.load_month_options()
+        self.month_combo.configure(values=list(self.month_options.keys()))
+        self.refresh()
+        if failed_paths:
+            messagebox.showwarning(
+                "請求削除",
+                f"{deleted_count}件を削除しました。\n一部のPDFは手動確認が必要です。\n{failed_paths[0]}",
+            )
+            return
+        messagebox.showinfo("請求削除", f"{deleted_count}件の請求データを削除しました。")

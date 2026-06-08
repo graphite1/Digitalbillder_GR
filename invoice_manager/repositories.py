@@ -457,6 +457,29 @@ def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> 
     return int(cur.rowcount)
 
 
+def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
+    ids = [int(invoice_id) for invoice_id in invoice_ids]
+    if not ids:
+        return 0, []
+    placeholders = ",".join("?" for _ in ids)
+    with get_connection() as conn:
+        file_rows = conn.execute(
+            f"""
+            SELECT stored_file_path
+            FROM invoice_files
+            WHERE invoice_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        conn.execute(f"DELETE FROM invoice_allocations WHERE invoice_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM invoice_files WHERE invoice_id IN ({placeholders})", ids)
+        cur = conn.execute(f"DELETE FROM invoices WHERE id IN ({placeholders})", ids)
+    deleted_paths = [_delete_invoice_file(Path(row["stored_file_path"])) for row in file_rows]
+    failed_paths = [str(path) for path in deleted_paths if path is not None]
+    add_audit_log("請求削除", "invoices", None, f"{len(ids)}件")
+    return int(cur.rowcount), failed_paths
+
+
 def recalculate_invoice_billing_months() -> int:
     with get_connection() as conn:
         rows = conn.execute("SELECT id, invoice_date FROM invoices").fetchall()
@@ -477,6 +500,27 @@ def recalculate_invoice_billing_months() -> int:
         )
     add_audit_log("請求月一括再計算", "invoices", None, f"{len(updates)}件")
     return len(updates)
+
+
+def _delete_invoice_file(path: Path) -> Path | None:
+    try:
+        if path.exists():
+            path.unlink()
+            _remove_empty_parent_dirs(path.parent)
+        return None
+    except Exception:
+        return path
+
+
+def _remove_empty_parent_dirs(path: Path) -> None:
+    current = path
+    originals_dir = (Path(__file__).resolve().parent.parent / "data" / "originals").resolve()
+    while current.exists() and current != originals_dir:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def list_work_type_codes(project_id: int | None = None, active_only: bool = False) -> list:
