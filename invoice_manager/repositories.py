@@ -5,7 +5,7 @@ from pathlib import Path
 
 from invoice_manager.db import get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
-from invoice_manager.utils.date_utils import parse_invoice_date, validate_billing_month
+from invoice_manager.utils.date_utils import billing_month_from_invoice_date, parse_invoice_date, validate_billing_month
 from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES
 
 
@@ -455,6 +455,28 @@ def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> 
         )
     add_audit_log("請求月変更", "invoices", None, f"{billing_month}: {len(ids)}件")
     return int(cur.rowcount)
+
+
+def recalculate_invoice_billing_months() -> int:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, invoice_date FROM invoices").fetchall()
+        updates = [
+            (billing_month_from_invoice_date(row["invoice_date"]), now_text(), int(row["id"]))
+            for row in rows
+            if (row["invoice_date"] or "").strip()
+        ]
+        if not updates:
+            return 0
+        conn.executemany(
+            """
+            UPDATE invoices
+            SET billing_month = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+    add_audit_log("請求月一括再計算", "invoices", None, f"{len(updates)}件")
+    return len(updates)
 
 
 def list_work_type_codes(project_id: int | None = None, active_only: bool = False) -> list:

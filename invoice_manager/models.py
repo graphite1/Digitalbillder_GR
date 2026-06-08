@@ -67,6 +67,7 @@ class PreviewResult:
     pdf_file_count: int
     project_totals: dict[str, int]
     vendor_totals: dict[str, int]
+    detected_billing_months: list[str] = field(default_factory=list)
     csv_rows: list[InvoiceCsvRow] = field(default_factory=list)
     zip_index: ZipIndex = field(default_factory=ZipIndex)
     duplicate_summary: DuplicateSummary = field(default_factory=DuplicateSummary)

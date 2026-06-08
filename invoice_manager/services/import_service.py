@@ -14,15 +14,15 @@ from invoice_manager.services.csv_reader import read_invoice_csv
 from invoice_manager.services.duplicate_checker import check_duplicates
 from invoice_manager.services.file_storage import store_pdf_from_zip
 from invoice_manager.services.zip_reader import read_zip_index
-from invoice_manager.utils.date_utils import validate_billing_month
+from invoice_manager.utils.date_utils import billing_month_from_invoice_date
 from invoice_manager.utils.file_hash import sha256_file
 
 
 def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> PreviewResult:
-    billing_month = _normalize_billing_month(billing_month)
     rows, errors, _encoding = read_invoice_csv(csv_path)
     zip_index = read_zip_index(zip_path)
     duplicate_summary = check_duplicates(rows)
+    detected_billing_months = _detect_billing_months(rows)
 
     csv_ids = {row.external_id for row in rows}
     zip_ids = set(zip_index.id_folders)
@@ -48,6 +48,8 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
         warnings.append(f"更新候補のため自動上書きしません: {external_id}")
     for external_id in sorted(duplicate_summary.duplicate_candidate_ids):
         warnings.append(f"重複候補のため自動登録しません: {external_id}")
+    if len(detected_billing_months) > 1:
+        warnings.append("請求月が複数含まれています。請求日から行単位で自動判定して登録します。")
 
     return PreviewResult(
         csv_count=len(rows),
@@ -64,6 +66,7 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
         pdf_file_count=pdf_file_count,
         project_totals=project_totals,
         vendor_totals=vendor_totals,
+        detected_billing_months=detected_billing_months,
         csv_rows=rows,
         zip_index=zip_index,
         duplicate_summary=duplicate_summary,
@@ -73,10 +76,10 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
 
 
 def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str = "") -> ImportResult:
-    billing_month = _normalize_billing_month(billing_month)
     preview = preview_import(csv_path, zip_path, billing_month)
+    batch_billing_month = preview.detected_billing_months[0] if len(preview.detected_billing_months) == 1 else ""
     import_batch_id = create_import_batch(
-        billing_month=billing_month,
+        billing_month=batch_billing_month,
         csv_path=csv_path,
         zip_path=zip_path,
         csv_hash=sha256_file(csv_path),
@@ -97,10 +100,11 @@ def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str
     for row in preview.csv_rows:
         if row.external_id not in importable_ids:
             continue
-        invoice_id = insert_invoice(row, billing_month, import_batch_id)
+        row_billing_month = billing_month_from_invoice_date(row.invoice_date)
+        invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
         inserted_count += 1
         for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
-            stored_path, file_hash, file_size = store_pdf_from_zip(zip_path, item, billing_month)
+            stored_path, file_hash, file_size = store_pdf_from_zip(zip_path, item, row_billing_month)
             inserted = insert_invoice_file(
                 invoice_id=invoice_id,
                 original_file_name=item.original_file_name,
@@ -121,8 +125,6 @@ def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str
     )
 
 
-def _normalize_billing_month(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        return ""
-    return validate_billing_month(text)
+def _detect_billing_months(rows) -> list[str]:
+    months = {billing_month_from_invoice_date(row.invoice_date) for row in rows if (row.invoice_date or "").strip()}
+    return sorted(month for month in months if month)

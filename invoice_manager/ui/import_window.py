@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from invoice_manager.services.csv_reader import read_invoice_csv
 from invoice_manager.services.import_service import execute_import, preview_import
-from invoice_manager.utils.date_utils import billing_month_candidates, format_billing_month
+from invoice_manager.utils.date_utils import billing_month_from_invoice_date, format_billing_month
 from invoice_manager.utils.money_utils import format_amount
 
 try:
@@ -24,10 +24,9 @@ class ImportWindow(tk.Toplevel):
 
         self.csv_var = tk.StringVar()
         self.zip_var = tk.StringVar()
-        self.month_var = tk.StringVar()
+        self.month_summary_var = tk.StringVar(value="自動判定")
         self.memo_var = tk.StringVar()
-        self.month_options: dict[str, str] = {}
-        for variable in (self.csv_var, self.zip_var, self.month_var):
+        for variable in (self.csv_var, self.zip_var):
             variable.trace_add("write", self.update_preview_button)
 
         form = tk.Frame(self, padx=12, pady=12)
@@ -35,8 +34,7 @@ class ImportWindow(tk.Toplevel):
         self._file_row(form, "CSVファイル選択", self.csv_var, self.select_csv, 0)
         self._file_row(form, "zipファイル選択", self.zip_var, self.select_zip, 1)
         tk.Label(form, text="請求月").grid(row=2, column=0, sticky=tk.W, pady=4)
-        self.month_combo = ttk.Combobox(form, textvariable=self.month_var, state="readonly")
-        self.month_combo.grid(row=2, column=1, sticky=tk.EW, pady=4)
+        tk.Entry(form, textvariable=self.month_summary_var, state="readonly").grid(row=2, column=1, sticky=tk.EW, pady=4)
         tk.Label(form, text="メモ").grid(row=3, column=0, sticky=tk.W, pady=4)
         tk.Entry(form, textvariable=self.memo_var).grid(row=3, column=1, sticky=tk.EW, pady=4)
         form.columnconfigure(1, weight=1)
@@ -67,7 +65,6 @@ class ImportWindow(tk.Toplevel):
         self.message = tk.Text(self, height=8)
         self.message.pack(fill=tk.X, padx=12, pady=(0, 12))
         self.setup_drop_target()
-        self.set_month_candidates(billing_month_candidates())
         self.update_preview_button()
 
     def _file_row(self, frame, label, variable, command, row) -> None:
@@ -89,8 +86,9 @@ class ImportWindow(tk.Toplevel):
         if not self.validate_preview_inputs("プレビュー"):
             return
         try:
-            self.preview = preview_import(Path(self.csv_var.get()), Path(self.zip_var.get()), self.selected_billing_month())
+            self.preview = preview_import(Path(self.csv_var.get()), Path(self.zip_var.get()), "")
             self.render_preview()
+            self.update_month_summary(self.preview.detected_billing_months)
         except Exception as exc:
             messagebox.showerror("プレビューエラー", str(exc))
 
@@ -98,16 +96,17 @@ class ImportWindow(tk.Toplevel):
         if not self.validate_preview_inputs("取込"):
             return
         try:
-            billing_month = self.selected_billing_month()
-            self.preview = preview_import(Path(self.csv_var.get()), Path(self.zip_var.get()), billing_month)
+            self.preview = preview_import(Path(self.csv_var.get()), Path(self.zip_var.get()), "")
             self.render_preview()
+            self.update_month_summary(self.preview.detected_billing_months)
             self.update_idletasks()
             confirmed = messagebox.askyesno("取込確認", "表示中のプレビュー内容で取込を実行しますか？")
             if not confirmed:
                 return
-            result = execute_import(Path(self.csv_var.get()), Path(self.zip_var.get()), billing_month, self.memo_var.get())
+            result = execute_import(Path(self.csv_var.get()), Path(self.zip_var.get()), "", self.memo_var.get())
             self.preview = result.preview
             self.render_preview()
+            self.update_month_summary(self.preview.detected_billing_months)
             messagebox.showinfo(
                 "取込完了",
                 f"登録件数: {result.inserted_count}\n添付ファイル登録件数: {result.file_count}",
@@ -155,20 +154,10 @@ class ImportWindow(tk.Toplevel):
         try:
             rows, _errors, _encoding = read_invoice_csv(Path(path))
         except Exception:
+            self.update_month_summary([])
             return
-        if rows:
-            center = rows[0].invoice_date[:7]
-            self.set_month_candidates(billing_month_candidates(center, before=1, after=3), center)
-
-    def set_month_candidates(self, months: list[str], selected_month: str | None = None) -> None:
-        self.month_options = {"未設定": ""}
-        self.month_options.update({format_billing_month(month): month for month in months})
-        labels = list(self.month_options.keys())
-        self.month_combo.configure(values=labels)
-        if selected_month:
-            self.month_var.set(format_billing_month(selected_month))
-        elif labels and not self.month_var.get().strip():
-            self.month_var.set(labels[0])
+        detected_months = sorted({billing_month_from_invoice_date(row.invoice_date) for row in rows if row.invoice_date})
+        self.update_month_summary(detected_months)
 
     def validate_preview_inputs(self, title: str) -> bool:
         if not self.csv_var.get().strip() or not self.zip_var.get().strip():
@@ -182,15 +171,18 @@ class ImportWindow(tk.Toplevel):
         enabled = all((self.csv_var.get().strip(), self.zip_var.get().strip()))
         self.preview_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
-    def selected_billing_month(self) -> str:
-        selected = self.month_var.get()
-        return self.month_options.get(selected, selected)
-
     def append_message(self, text: str) -> None:
         if not hasattr(self, "message"):
             return
         self.message.insert(tk.END, text)
         self.message.see(tk.END)
+
+    def update_month_summary(self, months: list[str]) -> None:
+        if not months:
+            self.month_summary_var.set("自動判定")
+            return
+        labels = "、".join(format_billing_month(month) for month in months)
+        self.month_summary_var.set(f"自動判定: {labels}")
 
     def render_preview(self) -> None:
         preview = self.preview
@@ -208,6 +200,7 @@ class ImportWindow(tk.Toplevel):
             ("エラー件数", preview.error_count),
             ("請求金額合計", format_amount(preview.total_amount)),
             ("PDFファイル総数", preview.pdf_file_count),
+            ("請求月(自動判定)", "、".join(format_billing_month(month) for month in preview.detected_billing_months) or "なし"),
         ]
         for name, value in rows:
             self.tree.insert("", tk.END, values=(name, value))

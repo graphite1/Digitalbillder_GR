@@ -19,6 +19,21 @@ def format_invoice_date(value: str) -> str:
     return f"{date.month}月{date.day}日"
 
 
+def billing_month_from_invoice_date(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    invoice_date = datetime.strptime(parse_invoice_date(text), "%Y-%m-%d").date()
+    year = invoice_date.year
+    month = invoice_date.month
+    if invoice_date.day >= 10:
+        month += 1
+        if month > 12:
+            year += 1
+            month = 1
+    return f"{year:04d}-{month:02d}"
+
+
 def validate_billing_month(value: str) -> str:
     text = (value or "").strip()
     for fmt in ("%Y-%m", "%Y/%m", "%Y年%m月", "%Y年%-m月"):

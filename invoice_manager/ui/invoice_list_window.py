@@ -6,6 +6,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import (
+    recalculate_invoice_billing_months,
     list_billing_months,
     list_invoice_dates,
     list_invoice_files,
@@ -224,6 +225,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.billing_month_button.pack(side=tk.LEFT, padx=4)
         self.pdf_button = tk.Button(frame, text="添付PDFを開く", command=self.open_first_pdf, state=tk.DISABLED)
         self.pdf_button.pack(side=tk.LEFT, padx=4)
+        tk.Button(frame, text="請求月一括再計算(テスト)", command=self.recalculate_billing_months).pack(side=tk.LEFT, padx=(12, 4))
         tk.Label(frame, textvariable=self.summary_var, anchor=tk.E).pack(side=tk.RIGHT, padx=4)
 
     def refresh(self) -> None:
@@ -424,3 +426,16 @@ class InvoiceListWindow(tk.Toplevel):
             os.startfile(str(validate_original_pdf_path(files[0]["stored_file_path"])))
         except Exception as exc:
             messagebox.showerror("PDFを開けません", str(exc))
+
+    def recalculate_billing_months(self) -> None:
+        confirmed = messagebox.askyesno(
+            "請求月一括再計算",
+            "既存の全請求データを請求日から請求月へ再計算します。\nテスト用の実行として続けますか？",
+        )
+        if not confirmed:
+            return
+        updated_count = recalculate_invoice_billing_months()
+        self.load_month_options()
+        self.month_combo.configure(values=list(self.month_options.keys()))
+        self.refresh()
+        messagebox.showinfo("請求月一括再計算", f"{updated_count}件の請求月を再計算しました。")
