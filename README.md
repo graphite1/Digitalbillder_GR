@@ -3,6 +3,8 @@
 Windowsローカルで動作する、Digital Billder請求書向けの補助台帳アプリです。
 Digital Billderを置き換えず、CSVとzip内PDF原本をローカルで保存・検索・集計します。
 
+詳細な機能仕様、画面仕様、制限値は [SPECIFICATIONS.md](/C:/Users/s-yobimoto/Codex_Script/DigitalBuileder_GR/SPECIFICATIONS.md) を参照してください。
+
 ## アプリ方針
 
 - Digital Billder側の登録状態、承認状態、支払状態は管理しません。
