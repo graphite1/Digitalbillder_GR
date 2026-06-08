@@ -52,6 +52,7 @@ class InvoiceListWindow(tk.Toplevel):
         }
 
         self.memo_var = tk.StringVar()
+        self.summary_var = tk.StringVar(value="表示件数: 0件    請求金額合計: 0")
         self.load_project_options()
         self.load_vendor_options()
         self.load_month_options()
@@ -157,26 +158,26 @@ class InvoiceListWindow(tk.Toplevel):
             "project_code",
             "project_name",
             "vendor_name",
-            "contact_name",
-            "email",
-            "phone",
             "invoice_date",
             "total_amount",
             "file_count",
             "local_memo",
+            "contact_name",
+            "email",
+            "phone",
         )
         headers = {
             "billing_month": "請求月",
             "project_code": "工事コード",
             "project_name": "工事名",
             "vendor_name": "取引先名",
-            "contact_name": "担当者名",
-            "email": "メールアドレス",
-            "phone": "電話番号",
             "invoice_date": "請求日",
             "total_amount": "請求金額(税込)",
             "file_count": "添付ファイル数",
             "local_memo": "メモ",
+            "contact_name": "担当者名",
+            "email": "メールアドレス",
+            "phone": "電話番号",
         }
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
@@ -188,27 +189,42 @@ class InvoiceListWindow(tk.Toplevel):
         for column in columns:
             self.tree.heading(column, text=headers[column])
             self.tree.column(column, width=120)
+        self.tree.column("billing_month", width=100, anchor=tk.CENTER)
+        self.tree.column("project_code", width=120, anchor=tk.CENTER)
         self.tree.column("project_name", width=260)
         self.tree.column("vendor_name", width=180)
-        self.tree.column("email", width=220)
+        self.tree.column("invoice_date", width=100, anchor=tk.CENTER)
+        self.tree.column("total_amount", width=110, anchor=tk.E)
+        self.tree.column("file_count", width=90, anchor=tk.CENTER)
         self.tree.column("local_memo", width=180)
+        self.tree.column("contact_name", width=100)
+        self.tree.column("email", width=220)
+        self.tree.column("phone", width=110)
         self.tree.grid(row=0, column=0, sticky=tk.NSEW)
         y_scrollbar.grid(row=0, column=1, sticky=tk.NS)
         x_scrollbar.grid(row=1, column=0, sticky=tk.EW)
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<MouseWheel>", self.on_tree_mousewheel)
         self.tree.bind("<Shift-MouseWheel>", self.on_tree_shift_mousewheel)
 
     def _build_actions(self) -> None:
         frame = tk.Frame(self, padx=10, pady=8)
         frame.pack(fill=tk.X)
-        tk.Button(frame, text="詳細を開く", command=self.open_detail).pack(side=tk.LEFT, padx=4)
-        tk.Entry(frame, textvariable=self.memo_var, width=36).pack(side=tk.LEFT, padx=4)
-        tk.Button(frame, text="メモ編集", command=self.save_memo).pack(side=tk.LEFT, padx=4)
-        tk.Button(frame, text="請求月変更", command=self.change_billing_month).pack(side=tk.LEFT, padx=4)
-        tk.Button(frame, text="添付PDFを開く", command=self.open_first_pdf).pack(side=tk.LEFT, padx=4)
+        self.detail_button = tk.Button(frame, text="詳細を開く", command=self.open_detail, state=tk.DISABLED)
+        self.detail_button.pack(side=tk.LEFT, padx=4)
+        tk.Label(frame, text="選択中メモ").pack(side=tk.LEFT, padx=(12, 4))
+        self.memo_entry = tk.Entry(frame, textvariable=self.memo_var, width=36, state="disabled")
+        self.memo_entry.pack(side=tk.LEFT, padx=4)
+        self.memo_button = tk.Button(frame, text="メモ編集", command=self.save_memo, state=tk.DISABLED)
+        self.memo_button.pack(side=tk.LEFT, padx=4)
+        self.billing_month_button = tk.Button(frame, text="請求月変更", command=self.change_billing_month, state=tk.DISABLED)
+        self.billing_month_button.pack(side=tk.LEFT, padx=4)
+        self.pdf_button = tk.Button(frame, text="添付PDFを開く", command=self.open_first_pdf, state=tk.DISABLED)
+        self.pdf_button.pack(side=tk.LEFT, padx=4)
+        tk.Label(frame, textvariable=self.summary_var, anchor=tk.E).pack(side=tk.RIGHT, padx=4)
 
     def refresh(self) -> None:
         filters = {}
@@ -239,7 +255,11 @@ class InvoiceListWindow(tk.Toplevel):
             filters["sort"] = sort_key
         self.tree.delete(*self.tree.get_children())
         self.invoice_ids.clear()
+        total_amount = 0
+        row_count = 0
         for row in list_invoices(filters):
+            row_count += 1
+            total_amount += int(row["total_amount"] or 0)
             item_id = self.tree.insert(
                 "",
                 tk.END,
@@ -248,16 +268,19 @@ class InvoiceListWindow(tk.Toplevel):
                     row["project_code"],
                     row["project_name"],
                     row["vendor_name"],
-                    row["contact_name"],
-                    row["email"],
-                    row["phone"],
                     row["invoice_date"],
                     format_amount(row["total_amount"]),
                     row["file_count"],
                     row["local_memo"],
+                    row["contact_name"],
+                    row["email"],
+                    row["phone"],
                 ),
             )
             self.invoice_ids[item_id] = int(row["id"])
+        self.summary_var.set(f"表示件数: {row_count}件    請求金額合計: {format_amount(total_amount)}")
+        self.memo_var.set("")
+        self._update_action_state()
 
     def on_filter_selected(self, _event=None) -> None:
         self.refresh()
@@ -271,6 +294,16 @@ class InvoiceListWindow(tk.Toplevel):
         units = -5 if event.delta > 0 else 5
         self.tree.xview_scroll(units, "units")
         return "break"
+
+    def _update_action_state(self) -> None:
+        has_selection = bool(self.tree.selection())
+        button_state = tk.NORMAL if has_selection else tk.DISABLED
+        entry_state = "normal" if has_selection else "disabled"
+        self.detail_button.configure(state=button_state)
+        self.memo_button.configure(state=button_state)
+        self.billing_month_button.configure(state=button_state)
+        self.pdf_button.configure(state=button_state)
+        self.memo_entry.configure(state=entry_state)
 
     def selected_invoice_id(self) -> int | None:
         selection = self.tree.selection()
@@ -289,9 +322,16 @@ class InvoiceListWindow(tk.Toplevel):
     def on_select(self, _event=None) -> None:
         selection = self.tree.selection()
         if not selection:
+            self.memo_var.set("")
+            self._update_action_state()
             return
         values = self.tree.item(selection[0], "values")
-        self.memo_var.set(values[10])
+        self.memo_var.set(values[7])
+        self._update_action_state()
+
+    def on_tree_double_click(self, _event=None) -> None:
+        if self.tree.selection():
+            self.open_detail()
 
     def open_detail(self) -> None:
         selection = self.tree.selection()
