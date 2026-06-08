@@ -38,15 +38,22 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.invoice_ids = invoice_ids or [invoice_id]
         self.current_index = max(0, min(current_index, len(self.invoice_ids) - 1))
         self.title("請求詳細")
-        self.geometry("1180x820")
+        self.geometry("1500x900")
         self.file_ids: dict[str, str] = {}
         self.allocation_ids: dict[str, int] = {}
         self.work_type_options: dict[str, int] = {}
         self.pdf_path: str | None = None
         self.pdf_page_index = 0
         self.pdf_page_count = 0
-        self.pdf_zoom = 1.0
+        self.pdf_zoom = 1.25
         self.pdf_image = None
+        self.pdf_image_item = None
+        self.pdf_image_width = 0
+        self.pdf_image_height = 0
+        self.pdf_pan_x = 0
+        self.pdf_pan_y = 0
+        self.pdf_drag_last_x = 0
+        self.pdf_drag_last_y = 0
         self.invoice_total = 0
         self.project_id: int | None = None
         self.vendor_id: int | None = None
@@ -56,73 +63,85 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.load()
 
     def _build(self) -> None:
-        header = tk.Frame(self, padx=10, pady=8)
-        header.pack(fill=tk.X)
+        top_area = tk.Frame(self, padx=10, pady=8)
+        top_area.pack(fill=tk.X)
+        top_area.columnconfigure(0, weight=0)
+        top_area.columnconfigure(1, weight=1)
+        top_area.rowconfigure(0, weight=1)
+        header = tk.Frame(top_area, width=390, height=210)
+        header.grid(row=0, column=0, sticky=tk.NW)
+        header.grid_propagate(False)
         self.vendor_name_var = tk.StringVar()
-        tk.Label(header, textvariable=self.vendor_name_var, font=("", 18, "bold"), anchor=tk.W).pack(fill=tk.X)
+        tk.Label(
+            header,
+            textvariable=self.vendor_name_var,
+            font=("", 18, "bold"),
+            anchor=tk.W,
+            wraplength=360,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X)
 
         self.info_vars = {
-            "external_id": tk.StringVar(),
             "billing_month": tk.StringVar(),
             "invoice_date": tk.StringVar(),
             "total_amount": tk.StringVar(),
-            "project": tk.StringVar(),
             "contact": tk.StringVar(),
         }
         info_frame = tk.Frame(header)
         info_frame.pack(fill=tk.X, pady=(6, 0))
         info_items = [
-            ("請求ID", "external_id"),
             ("請求月", "billing_month"),
             ("請求日", "invoice_date"),
             ("請求金額", "total_amount"),
-            ("工事", "project"),
             ("担当", "contact"),
         ]
         for index, (label, key) in enumerate(info_items):
-            row_index = index // 3
-            label_column = (index % 3) * 2
             tk.Label(info_frame, text=f"{label}:", fg="#555555").grid(
-                row=row_index, column=label_column, sticky=tk.W, padx=(0, 4), pady=1
+                row=index, column=0, sticky=tk.W, padx=(0, 4), pady=1
             )
-            tk.Label(info_frame, textvariable=self.info_vars[key], anchor=tk.W).grid(
-                row=row_index, column=label_column + 1, sticky=tk.W, padx=(0, 18), pady=1
+            tk.Label(
+                info_frame,
+                textvariable=self.info_vars[key],
+                anchor=tk.W,
+                justify=tk.LEFT,
+                wraplength=300,
+            ).grid(
+                row=index, column=1, sticky=tk.W, padx=(0, 4), pady=1
             )
 
-        action = tk.Frame(self, padx=10)
-        action.pack(fill=tk.X)
-        tk.Button(action, text="前の請求", command=self.previous_invoice).pack(side=tk.LEFT, padx=4)
+        action = tk.Frame(header)
+        action.pack(fill=tk.X, pady=(10, 0))
+        tk.Button(action, text="前の請求", command=self.previous_invoice).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(action, text="次の請求", command=self.next_invoice).pack(side=tk.LEFT, padx=4)
         self.invoice_nav_var = tk.StringVar()
         tk.Label(action, textvariable=self.invoice_nav_var).pack(side=tk.LEFT, padx=8)
         tk.Button(action, text="メモを開く", command=self.open_memo_dialog).pack(side=tk.LEFT, padx=4)
         tk.Checkbutton(action, text="最前面表示", variable=self.topmost_var, command=self.toggle_topmost).pack(
-            side=tk.LEFT, padx=12
+            side=tk.LEFT, padx=8
         )
 
-        content = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=6)
-        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
-        left = tk.Frame(content)
-        right = tk.Frame(content)
-        content.add(left, minsize=430)
-        content.add(right, minsize=360)
+        side_panel = tk.Frame(top_area, height=210)
+        side_panel.grid(row=0, column=1, sticky=tk.NSEW, padx=(10, 0))
+        side_panel.columnconfigure(0, weight=3)
+        side_panel.columnconfigure(1, weight=2)
+        side_panel.rowconfigure(0, weight=1)
 
-        allocation_frame = tk.LabelFrame(left, text="工種コード別振分", padx=8, pady=8)
-        allocation_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        allocation_frame = tk.LabelFrame(side_panel, text="工種コード別振分", padx=8, pady=8)
+        allocation_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
         self.allocation_summary_var = tk.StringVar()
         tk.Label(allocation_frame, textvariable=self.allocation_summary_var).pack(anchor=tk.W)
         self.allocations = ttk.Treeview(
             allocation_frame,
             columns=("code", "name", "amount", "memo", "sort_order"),
             show="headings",
-            height=7,
+            height=5,
         )
         for column, label, width in [
-            ("code", "工種コード", 100),
-            ("name", "工種名", 220),
+            ("code", "工種コード", 80),
+            ("name", "工種名", 180),
             ("amount", "振分金額", 110),
-            ("memo", "メモ", 220),
-            ("sort_order", "並び順", 70),
+            ("memo", "メモ", 160),
+            ("sort_order", "並び順", 50),
         ]:
             self.allocations.heading(column, text=label)
             self.allocations.column(column, width=width)
@@ -133,19 +152,19 @@ class InvoiceDetailWindow(tk.Toplevel):
         tk.Button(buttons, text="振分行を編集", command=self.edit_allocation).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="振分行を削除", command=self.delete_allocation).pack(side=tk.LEFT, padx=4)
 
-        files_frame = tk.LabelFrame(left, text="添付ファイル", padx=8, pady=8)
-        files_frame.pack(fill=tk.BOTH, expand=True)
+        files_frame = tk.LabelFrame(side_panel, text="添付ファイル", padx=8, pady=8)
+        files_frame.grid(row=0, column=1, sticky=tk.NSEW)
         self.files = ttk.Treeview(files_frame, columns=("name", "size"), show="headings", height=5)
         self.files.heading("name", text="添付ファイル一覧")
         self.files.heading("size", text="サイズ")
-        self.files.column("name", width=620)
-        self.files.column("size", width=100)
+        self.files.column("name", width=300)
+        self.files.column("size", width=80)
         self.files.pack(fill=tk.BOTH, expand=True)
         self.files.bind("<<TreeviewSelect>>", self.on_pdf_file_selected)
         tk.Button(files_frame, text="PDFを開く", command=self.open_pdf).pack(anchor=tk.W, pady=(6, 0))
 
-        pdf_frame = tk.LabelFrame(right, text="PDFプレビュー（原本は編集しません）", padx=8, pady=8)
-        pdf_frame.pack(fill=tk.BOTH, expand=True)
+        pdf_frame = tk.LabelFrame(self, text="PDFプレビュー（原本は編集しません）", padx=8, pady=8)
+        pdf_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
         pdf_actions = tk.Frame(pdf_frame)
         pdf_actions.pack(fill=tk.X)
         tk.Button(pdf_actions, text="前ページ", command=self.previous_pdf_page).pack(side=tk.LEFT, padx=2)
@@ -161,6 +180,10 @@ class InvoiceDetailWindow(tk.Toplevel):
         pdf_y_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.pdf_canvas.yview)
         pdf_x_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.pdf_canvas.xview)
         self.pdf_canvas.configure(yscrollcommand=pdf_y_scrollbar.set, xscrollcommand=pdf_x_scrollbar.set)
+        self.pdf_canvas.bind("<ButtonPress-3>", self.start_pdf_drag)
+        self.pdf_canvas.bind("<B3-Motion>", self.drag_pdf)
+        self.pdf_canvas.bind("<Control-MouseWheel>", self.zoom_pdf_with_mousewheel)
+        self.pdf_canvas.bind("<Enter>", lambda _event: self.pdf_canvas.focus_set())
         self.pdf_canvas.grid(row=0, column=0, sticky=tk.NSEW)
         pdf_y_scrollbar.grid(row=0, column=1, sticky=tk.NS)
         pdf_x_scrollbar.grid(row=1, column=0, sticky=tk.EW)
@@ -177,11 +200,9 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.project_id = int(row["project_id"])
         self.vendor_id = int(row["vendor_id"])
         self.vendor_name_var.set(row["vendor_name"])
-        self.info_vars["external_id"].set(row["external_id"])
         self.info_vars["billing_month"].set(format_billing_month(row["billing_month"]))
         self.info_vars["invoice_date"].set(row["invoice_date"])
         self.info_vars["total_amount"].set(f"{format_amount(row['total_amount'])}円")
-        self.info_vars["project"].set(f"{row['project_code']}｜{row['project_name']}")
         self.info_vars["contact"].set(f"{row['last_name'] or ''} {row['first_name'] or ''}".strip())
         self.memo_text = row["local_memo"] or ""
         self.update_invoice_navigation()
@@ -401,6 +422,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         try:
             self.pdf_path = str(validate_original_pdf_path(path))
             self.pdf_page_index = 0
+            self.reset_pdf_pan()
             self.render_pdf_page()
         except Exception as exc:
             self.pdf_path = None
@@ -425,8 +447,14 @@ class InvoiceDetailWindow(tk.Toplevel):
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(self.pdf_zoom, self.pdf_zoom), alpha=False)
                 image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
                 self.pdf_image = ImageTk.PhotoImage(image)
-                self.pdf_canvas.create_image(0, 0, image=self.pdf_image, anchor=tk.NW)
-                self.pdf_canvas.configure(scrollregion=(0, 0, pixmap.width, pixmap.height))
+                self.pdf_image_width = pixmap.width
+                self.pdf_image_height = pixmap.height
+                self.pdf_canvas.update_idletasks()
+                canvas_width = self.pdf_canvas.winfo_width()
+                image_x = max((canvas_width - pixmap.width) // 2, 0) + self.pdf_pan_x
+                image_y = self.pdf_pan_y
+                self.pdf_image_item = self.pdf_canvas.create_image(image_x, image_y, image=self.pdf_image, anchor=tk.NW)
+                self.update_pdf_scrollregion()
                 self.pdf_status_var.set(
                     f"{self.pdf_page_index + 1}/{self.pdf_page_count}ページ  {int(self.pdf_zoom * 100)}%"
                 )
@@ -438,15 +466,18 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.pdf_canvas.configure(scrollregion=(0, 0, 0, 0))
         self.pdf_status_var.set(message)
         self.pdf_image = None
+        self.pdf_image_item = None
 
     def previous_pdf_page(self) -> None:
         if self.pdf_page_index > 0:
             self.pdf_page_index -= 1
+            self.reset_pdf_pan()
             self.render_pdf_page()
 
     def next_pdf_page(self) -> None:
         if self.pdf_page_index + 1 < self.pdf_page_count:
             self.pdf_page_index += 1
+            self.reset_pdf_pan()
             self.render_pdf_page()
 
     def zoom_in_pdf(self) -> None:
@@ -456,3 +487,49 @@ class InvoiceDetailWindow(tk.Toplevel):
     def zoom_out_pdf(self) -> None:
         self.pdf_zoom = max(0.5, self.pdf_zoom - 0.25)
         self.render_pdf_page()
+
+    def start_pdf_drag(self, event) -> str:
+        self.pdf_drag_last_x = event.x
+        self.pdf_drag_last_y = event.y
+        return "break"
+
+    def drag_pdf(self, event) -> str:
+        dx = event.x - self.pdf_drag_last_x
+        dy = event.y - self.pdf_drag_last_y
+        self.pdf_drag_last_x = event.x
+        self.pdf_drag_last_y = event.y
+        self.pdf_pan_x += dx
+        self.pdf_pan_y += dy
+        if self.pdf_image_item is not None:
+            self.pdf_canvas.move(self.pdf_image_item, dx, dy)
+            self.update_pdf_scrollregion()
+        return "break"
+
+    def zoom_pdf_with_mousewheel(self, event) -> str:
+        if event.delta > 0:
+            self.pdf_zoom = min(3.0, self.pdf_zoom + 0.25)
+        else:
+            self.pdf_zoom = max(0.5, self.pdf_zoom - 0.25)
+        self.render_pdf_page()
+        return "break"
+
+    def reset_pdf_pan(self) -> None:
+        self.pdf_pan_x = 0
+        self.pdf_pan_y = 0
+
+    def update_pdf_scrollregion(self) -> None:
+        if self.pdf_image_item is None:
+            return
+        x1, y1 = self.pdf_canvas.coords(self.pdf_image_item)
+        x2 = x1 + self.pdf_image_width
+        y2 = y1 + self.pdf_image_height
+        canvas_width = self.pdf_canvas.winfo_width()
+        canvas_height = self.pdf_canvas.winfo_height()
+        self.pdf_canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                max(canvas_width, x2),
+                max(canvas_height, y2),
+            )
+        )

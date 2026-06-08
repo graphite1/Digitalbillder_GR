@@ -294,17 +294,19 @@ class InvoiceListWindow(tk.Toplevel):
         self.memo_var.set(values[10])
 
     def open_detail(self) -> None:
-        invoice_id = self.selected_invoice_id()
-        if not invoice_id:
-            return
         selection = self.tree.selection()
-        selected_values = self.tree.item(selection[0], "values")
-        selected_vendor = selected_values[3]
-        invoice_ids = []
-        for item_id in self.tree.get_children():
-            values = self.tree.item(item_id, "values")
-            if values[3] == selected_vendor:
-                invoice_ids.append(self.invoice_ids[item_id])
+        if not selection:
+            messagebox.showwarning("選択なし", "請求を選択してください。")
+            return
+        focused_item = self.tree.focus()
+        current_item = focused_item if focused_item in selection else selection[0]
+        invoice_id = self.invoice_ids[current_item]
+        selected_items = set(selection)
+        invoice_ids = [
+            self.invoice_ids[item_id]
+            for item_id in self.tree.get_children()
+            if item_id in selected_items
+        ]
         current_index = invoice_ids.index(invoice_id) if invoice_id in invoice_ids else 0
         InvoiceDetailWindow(self, invoice_id, on_saved=self.refresh, invoice_ids=invoice_ids, current_index=current_index)
 
