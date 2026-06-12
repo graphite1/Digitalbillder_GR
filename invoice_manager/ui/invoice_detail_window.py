@@ -30,6 +30,7 @@ from invoice_manager.repositories import (
     update_pdf_mark_position,
     update_invoice_memo,
 )
+from invoice_manager.services.export_marked_pdf import export_marked_pdf
 from invoice_manager.utils.file_size_utils import format_file_size
 from invoice_manager.utils.date_utils import format_billing_month
 from invoice_manager.utils.file_safety import validate_original_pdf_path
@@ -181,6 +182,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.files.pack(fill=tk.BOTH, expand=True)
         self.files.bind("<<TreeviewSelect>>", self.on_pdf_file_selected)
         tk.Button(files_frame, text="PDFを開く", command=self.open_pdf).pack(anchor=tk.W, pady=(6, 0))
+        tk.Button(files_frame, text="確認用PDF出力", command=self.export_current_pdf).pack(anchor=tk.W, pady=(6, 0))
 
         pdf_frame = tk.LabelFrame(self, text="PDFプレビュー（原本は編集しません）", padx=8, pady=8)
         pdf_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
@@ -479,6 +481,23 @@ class InvoiceDetailWindow(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("PDFを開けません", str(exc))
 
+    def export_current_pdf(self) -> None:
+        selection = self.files.selection()
+        if not selection:
+            messagebox.showwarning("選択なし", "PDFを選択してください。")
+            return
+        item_id = selection[0]
+        file_id = self.file_db_ids.get(item_id)
+        file_path = self.file_ids.get(item_id)
+        if file_id is None or not file_path:
+            messagebox.showwarning("PDF未選択", "出力するPDFを選択してください。")
+            return
+        try:
+            path = export_marked_pdf(self.invoice_id, file_id, file_path)
+            messagebox.showinfo("確認用PDF出力", f"出力しました:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("確認用PDF出力エラー", str(exc))
+
     def on_pdf_file_selected(self, _event=None) -> None:
         selection = self.files.selection()
         if selection:
@@ -539,6 +558,26 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.pdf_mark_item_ids.clear()
         self.current_pdf_mark_rows.clear()
 
+    def _get_pdf_mark_display_text(self, row: dict) -> str:
+        work_type_code = str(row["work_type_code"] or "").strip()
+        return work_type_code or str(row["label"])
+
+    def _get_pdf_mark_fill_color(self, work_type_code: str) -> str:
+        palette = (
+            "#1d4ed8",
+            "#047857",
+            "#b45309",
+            "#be123c",
+            "#6d28d9",
+            "#0f766e",
+            "#92400e",
+            "#b91c1c",
+        )
+        if not work_type_code:
+            return "#475569"
+        index = sum(ord(char) for char in work_type_code) % len(palette)
+        return palette[index]
+
     def render_pdf_marks(self) -> None:
         self.pdf_canvas.delete("pdf_mark_overlay")
         self.pdf_mark_item_ids.clear()
@@ -551,14 +590,18 @@ class InvoiceDetailWindow(tk.Toplevel):
             self.current_pdf_mark_rows[row_id] = dict(row)
             center_x = image_x + float(row["x_ratio"]) * self.pdf_image_width
             center_y = image_y + float(row["y_ratio"]) * self.pdf_image_height
-            radius = 14
+            display_text = self._get_pdf_mark_display_text(row)
+            fill_color = self._get_pdf_mark_fill_color(str(row["work_type_code"] or ""))
+            horizontal_padding = 10
+            half_width = max(22, len(display_text) * 4 + horizontal_padding)
+            half_height = 14
             tag = f"pdf_mark_{row_id}"
-            oval_id = self.pdf_canvas.create_oval(
-                center_x - radius,
-                center_y - radius,
-                center_x + radius,
-                center_y + radius,
-                fill="#d62828",
+            oval_id = self.pdf_canvas.create_rectangle(
+                center_x - half_width,
+                center_y - half_height,
+                center_x + half_width,
+                center_y + half_height,
+                fill=fill_color,
                 outline="#ffeb3b" if self.selected_mark_id == row_id else "#ffffff",
                 width=2,
                 tags=("pdf_mark_overlay", tag),
@@ -566,7 +609,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             text_id = self.pdf_canvas.create_text(
                 center_x,
                 center_y,
-                text=row["label"],
+                text=display_text,
                 fill="#ffffff",
                 font=("", 10, "bold"),
                 tags=("pdf_mark_overlay", tag),
