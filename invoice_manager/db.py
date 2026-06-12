@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS invoice_allocations (
     FOREIGN KEY(work_type_code_id) REFERENCES work_type_codes(id)
 );
 
+CREATE TABLE IF NOT EXISTS pdf_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_file_id INTEGER NOT NULL,
+    invoice_id INTEGER NOT NULL,
+    allocation_id INTEGER,
+    page_number INTEGER NOT NULL,
+    x_ratio REAL NOT NULL,
+    y_ratio REAL NOT NULL,
+    mark_type TEXT NOT NULL,
+    label TEXT NOT NULL,
+    memo TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(invoice_file_id) REFERENCES invoice_files(id),
+    FOREIGN KEY(invoice_id) REFERENCES invoices(id),
+    FOREIGN KEY(allocation_id) REFERENCES invoice_allocations(id)
+);
+
 CREATE TABLE IF NOT EXISTS vendor_work_type_candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     vendor_id INTEGER NOT NULL,

@@ -471,6 +471,7 @@ def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
             """,
             ids,
         ).fetchall()
+        conn.execute(f"DELETE FROM pdf_marks WHERE invoice_id IN ({placeholders})", ids)
         conn.execute(f"DELETE FROM invoice_allocations WHERE invoice_id IN ({placeholders})", ids)
         conn.execute(f"DELETE FROM invoice_files WHERE invoice_id IN ({placeholders})", ids)
         cur = conn.execute(f"DELETE FROM invoices WHERE id IN ({placeholders})", ids)
@@ -698,11 +699,12 @@ def list_invoice_allocations(invoice_id: int) -> list:
 def save_invoice_allocation(
     invoice_id: int,
     work_type_code_id: int,
-    amount: int,
+    amount: int | None,
     memo: str = "",
     sort_order: int = 0,
     allocation_id: int | None = None,
 ) -> int:
+    normalized_amount = 0 if amount is None else int(amount)
     timestamp = now_text()
     with get_connection() as conn:
         if allocation_id:
@@ -712,7 +714,7 @@ def save_invoice_allocation(
                 SET work_type_code_id = ?, amount = ?, memo = ?, sort_order = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (work_type_code_id, amount, memo, sort_order, timestamp, allocation_id),
+                (work_type_code_id, normalized_amount, memo, sort_order, timestamp, allocation_id),
             )
             saved_id = int(allocation_id)
             action = "振分更新"
@@ -723,16 +725,17 @@ def save_invoice_allocation(
                     (invoice_id, work_type_code_id, amount, memo, sort_order, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (invoice_id, work_type_code_id, amount, memo, sort_order, timestamp, timestamp),
+                (invoice_id, work_type_code_id, normalized_amount, memo, sort_order, timestamp, timestamp),
             )
             saved_id = int(cur.lastrowid)
             action = "振分登録"
-    add_audit_log(action, "invoice_allocations", saved_id, str(amount))
+    add_audit_log(action, "invoice_allocations", saved_id, str(normalized_amount))
     return saved_id
 
 
 def delete_invoice_allocation(allocation_id: int) -> None:
     with get_connection() as conn:
+        conn.execute("DELETE FROM pdf_marks WHERE allocation_id = ?", (allocation_id,))
         conn.execute("DELETE FROM invoice_allocations WHERE id = ?", (allocation_id,))
     add_audit_log("振分削除", "invoice_allocations", allocation_id, "")
 
@@ -744,6 +747,121 @@ def get_invoice_allocation_total(invoice_id: int) -> int:
             (invoice_id,),
         ).fetchone()
     return int(row["total"])
+
+
+def get_or_create_pdf_mark_label(invoice_id: int, allocation_id: int) -> str:
+    with get_connection() as conn:
+        existing = conn.execute(
+            """
+            SELECT label
+            FROM pdf_marks
+            WHERE invoice_id = ? AND allocation_id = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(invoice_id), int(allocation_id)),
+        ).fetchone()
+        if existing:
+            return str(existing["label"])
+        rows = conn.execute(
+            """
+            SELECT DISTINCT label
+            FROM pdf_marks
+            WHERE invoice_id = ?
+            ORDER BY id ASC
+            """,
+            (int(invoice_id),),
+        ).fetchall()
+    used_numbers = [int(row["label"]) for row in rows if str(row["label"]).isdigit()]
+    return str(max(used_numbers, default=0) + 1)
+
+
+def list_pdf_marks(invoice_id: int, invoice_file_id: int | None = None, page_number: int | None = None) -> list:
+    where = ["pdf_marks.invoice_id = ?"]
+    params: list[int] = [int(invoice_id)]
+    if invoice_file_id is not None:
+        where.append("pdf_marks.invoice_file_id = ?")
+        params.append(int(invoice_file_id))
+    if page_number is not None:
+        where.append("pdf_marks.page_number = ?")
+        params.append(int(page_number))
+    sql = f"""
+        SELECT
+            pdf_marks.*,
+            COALESCE(work_type_codes.code, '') AS work_type_code,
+            COALESCE(work_type_codes.name, '') AS work_type_name
+        FROM pdf_marks
+        LEFT JOIN invoice_allocations ON invoice_allocations.id = pdf_marks.allocation_id
+        LEFT JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+        WHERE {' AND '.join(where)}
+        ORDER BY pdf_marks.page_number ASC, pdf_marks.id ASC
+    """
+    with get_connection() as conn:
+        return list(conn.execute(sql, params).fetchall())
+
+
+def create_pdf_mark(
+    invoice_file_id: int,
+    invoice_id: int,
+    allocation_id: int,
+    page_number: int,
+    x_ratio: float,
+    y_ratio: float,
+    mark_type: str,
+    label: str,
+    memo: str = "",
+) -> int:
+    if not 0 <= x_ratio <= 1 or not 0 <= y_ratio <= 1:
+        raise ValueError("PDFマーク位置がページ範囲外です。")
+    timestamp = now_text()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO pdf_marks
+                (
+                    invoice_file_id, invoice_id, allocation_id, page_number,
+                    x_ratio, y_ratio, mark_type, label, memo, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(invoice_file_id),
+                int(invoice_id),
+                int(allocation_id),
+                int(page_number),
+                float(x_ratio),
+                float(y_ratio),
+                mark_type,
+                label,
+                memo,
+                timestamp,
+                timestamp,
+            ),
+        )
+        saved_id = int(cur.lastrowid)
+    add_audit_log("PDFマーク登録", "pdf_marks", saved_id, label)
+    return saved_id
+
+
+def delete_pdf_mark(mark_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM pdf_marks WHERE id = ?", (int(mark_id),))
+    add_audit_log("PDFマーク削除", "pdf_marks", int(mark_id), "")
+
+
+def update_pdf_mark_position(mark_id: int, x_ratio: float, y_ratio: float) -> None:
+    if not 0 <= x_ratio <= 1 or not 0 <= y_ratio <= 1:
+        raise ValueError("PDFマーク位置がページ範囲外です。")
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE pdf_marks
+            SET x_ratio = ?, y_ratio = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (float(x_ratio), float(y_ratio), now_text(), int(mark_id)),
+        )
+    add_audit_log("PDFマーク位置更新", "pdf_marks", int(mark_id), f"{x_ratio:.4f},{y_ratio:.4f}")
 
 
 def list_work_type_summary(kind: str) -> list:
