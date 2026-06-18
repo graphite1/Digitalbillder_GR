@@ -119,6 +119,10 @@ CREATE TABLE IF NOT EXISTS pdf_marks (
     page_number INTEGER NOT NULL,
     x_ratio REAL NOT NULL,
     y_ratio REAL NOT NULL,
+    x_pt REAL,
+    y_pt REAL,
+    page_width_pt REAL,
+    page_height_pt REAL,
     mark_type TEXT NOT NULL,
     label TEXT NOT NULL,
     memo TEXT,
@@ -182,6 +186,7 @@ def initialize_database() -> None:
         conn.executescript(SCHEMA)
         _migrate_invoices_table(conn)
         _migrate_invoice_files_table(conn)
+        _migrate_pdf_marks_table(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
 
 
@@ -270,3 +275,18 @@ def _migrate_invoice_files_table(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DROP TABLE invoice_files_old")
     conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_pdf_marks_table(conn: sqlite3.Connection) -> None:
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(pdf_marks)").fetchall()]
+    add_columns = []
+    if "x_pt" not in columns:
+        add_columns.append("ALTER TABLE pdf_marks ADD COLUMN x_pt REAL")
+    if "y_pt" not in columns:
+        add_columns.append("ALTER TABLE pdf_marks ADD COLUMN y_pt REAL")
+    if "page_width_pt" not in columns:
+        add_columns.append("ALTER TABLE pdf_marks ADD COLUMN page_width_pt REAL")
+    if "page_height_pt" not in columns:
+        add_columns.append("ALTER TABLE pdf_marks ADD COLUMN page_height_pt REAL")
+    for sql in add_columns:
+        conn.execute(sql)

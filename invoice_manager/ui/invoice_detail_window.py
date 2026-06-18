@@ -59,6 +59,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.pdf_image_item = None
         self.pdf_image_width = 0
         self.pdf_image_height = 0
+        self.pdf_page_width_pt = 0.0
+        self.pdf_page_height_pt = 0.0
         self.pdf_pan_x = 0
         self.pdf_pan_y = 0
         self.pdf_drag_last_x = 0
@@ -531,6 +533,8 @@ class InvoiceDetailWindow(tk.Toplevel):
                     return
                 self.pdf_page_index = max(0, min(self.pdf_page_index, self.pdf_page_count - 1))
                 page = document.load_page(self.pdf_page_index)
+                self.pdf_page_width_pt = float(page.rect.width)
+                self.pdf_page_height_pt = float(page.rect.height)
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(self.pdf_zoom, self.pdf_zoom), alpha=False)
                 image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
                 self.pdf_image = ImageTk.PhotoImage(image)
@@ -555,6 +559,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.pdf_status_var.set(message)
         self.pdf_image = None
         self.pdf_image_item = None
+        self.pdf_page_width_pt = 0.0
+        self.pdf_page_height_pt = 0.0
         self.pdf_mark_item_ids.clear()
         self.current_pdf_mark_rows.clear()
 
@@ -582,14 +588,20 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.pdf_canvas.delete("pdf_mark_overlay")
         self.pdf_mark_item_ids.clear()
         self.current_pdf_mark_rows.clear()
-        if self.pdf_image_item is None or self.current_invoice_file_id is None:
+        if (
+            self.pdf_image_item is None
+            or self.current_invoice_file_id is None
+            or self.pdf_page_width_pt <= 0
+            or self.pdf_page_height_pt <= 0
+        ):
             return
         image_x, image_y = self.pdf_canvas.coords(self.pdf_image_item)
         for row in list_pdf_marks(self.invoice_id, self.current_invoice_file_id, self.pdf_page_index + 1):
             row_id = int(row["id"])
             self.current_pdf_mark_rows[row_id] = dict(row)
-            center_x = image_x + float(row["x_ratio"]) * self.pdf_image_width
-            center_y = image_y + float(row["y_ratio"]) * self.pdf_image_height
+            x_pt, y_pt = self._get_mark_pdf_point(row)
+            center_x = image_x + x_pt * self.pdf_zoom
+            center_y = image_y + y_pt * self.pdf_zoom
             display_text = self._get_pdf_mark_display_text(row)
             fill_color = self._get_pdf_mark_fill_color(str(row["work_type_code"] or ""))
             horizontal_padding = 10
@@ -690,6 +702,23 @@ class InvoiceDetailWindow(tk.Toplevel):
             )
         )
 
+    def _get_mark_pdf_point(self, row: dict) -> tuple[float, float]:
+        x_pt = row["x_pt"]
+        y_pt = row["y_pt"]
+        if x_pt is not None and y_pt is not None:
+            return float(x_pt), float(y_pt)
+        return (
+            float(row["x_ratio"]) * self.pdf_page_width_pt,
+            float(row["y_ratio"]) * self.pdf_page_height_pt,
+        )
+
+    def _canvas_to_pdf_point(self, canvas_x: float, canvas_y: float) -> tuple[float, float]:
+        image_x, image_y = self.pdf_canvas.coords(self.pdf_image_item)
+        return (
+            (canvas_x - image_x) / self.pdf_zoom,
+            (canvas_y - image_y) / self.pdf_zoom,
+        )
+
     def place_pdf_mark(self, event) -> str | None:
         canvas_x = self.pdf_canvas.canvasx(event.x)
         canvas_y = self.pdf_canvas.canvasy(event.y)
@@ -715,6 +744,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         relative_y = canvas_y - image_y
         if not (0 <= relative_x <= self.pdf_image_width and 0 <= relative_y <= self.pdf_image_height):
             return "break"
+        x_pt, y_pt = self._canvas_to_pdf_point(canvas_x, canvas_y)
         label = get_or_create_pdf_mark_label(self.invoice_id, allocation["allocation_id"])
         try:
             mark_id = create_pdf_mark(
@@ -724,6 +754,10 @@ class InvoiceDetailWindow(tk.Toplevel):
                 page_number=self.pdf_page_index + 1,
                 x_ratio=relative_x / self.pdf_image_width,
                 y_ratio=relative_y / self.pdf_image_height,
+                x_pt=x_pt,
+                y_pt=y_pt,
+                page_width_pt=self.pdf_page_width_pt,
+                page_height_pt=self.pdf_page_height_pt,
                 mark_type="allocation",
                 label=label,
             )
@@ -774,8 +808,17 @@ class InvoiceDetailWindow(tk.Toplevel):
             image_x, image_y = self.pdf_canvas.coords(self.pdf_image_item)
             x_ratio = (center_x - image_x) / self.pdf_image_width
             y_ratio = (center_y - image_y) / self.pdf_image_height
+            x_pt, y_pt = self._canvas_to_pdf_point(center_x, center_y)
             try:
-                update_pdf_mark_position(self.dragging_mark_id, x_ratio, y_ratio)
+                update_pdf_mark_position(
+                    self.dragging_mark_id,
+                    x_ratio,
+                    y_ratio,
+                    x_pt,
+                    y_pt,
+                    self.pdf_page_width_pt,
+                    self.pdf_page_height_pt,
+                )
             except Exception as exc:
                 messagebox.showerror("PDFマーク更新エラー", str(exc))
         self.dragging_mark_id = None

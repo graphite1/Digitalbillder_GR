@@ -64,8 +64,8 @@ def _group_marks_by_page(rows: list) -> dict[int, list[dict]]:
 def _draw_mark(page, row: dict, page_width: float, page_height: float) -> None:
     text = _get_display_text(row)
     fill_color = _hex_to_rgb(_get_fill_color(str(row["work_type_code"] or "")))
-    x = float(row["x_ratio"]) * page_width
-    y = float(row["y_ratio"]) * page_height
+    x = _get_mark_x_pt(row, page_width)
+    y = _get_mark_y_pt(row, page_height)
     half_width = max(28.0, len(text) * 7.0 + 12.0)
     half_height = 12.0
     rect = fitz.Rect(x - half_width, y - half_height, x + half_width, y + half_height)
@@ -89,3 +89,15 @@ def _get_fill_color(work_type_code: str) -> str:
 def _hex_to_rgb(value: str) -> tuple[float, float, float]:
     text = value.lstrip("#")
     return tuple(int(text[index:index + 2], 16) / 255 for index in (0, 2, 4))
+
+
+def _get_mark_x_pt(row: dict, page_width: float) -> float:
+    if row["x_pt"] is not None:
+        return float(row["x_pt"])
+    return float(row["x_ratio"]) * page_width
+
+
+def _get_mark_y_pt(row: dict, page_height: float) -> float:
+    if row["y_pt"] is not None:
+        return float(row["y_pt"])
+    return float(row["y_ratio"]) * page_height

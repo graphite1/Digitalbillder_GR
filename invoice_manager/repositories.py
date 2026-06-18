@@ -807,11 +807,17 @@ def create_pdf_mark(
     page_number: int,
     x_ratio: float,
     y_ratio: float,
+    x_pt: float,
+    y_pt: float,
+    page_width_pt: float,
+    page_height_pt: float,
     mark_type: str,
     label: str,
     memo: str = "",
 ) -> int:
     if not 0 <= x_ratio <= 1 or not 0 <= y_ratio <= 1:
+        raise ValueError("PDFマーク位置がページ範囲外です。")
+    if not (0 <= x_pt <= page_width_pt) or not (0 <= y_pt <= page_height_pt) or page_width_pt <= 0 or page_height_pt <= 0:
         raise ValueError("PDFマーク位置がページ範囲外です。")
     timestamp = now_text()
     with get_connection() as conn:
@@ -820,9 +826,10 @@ def create_pdf_mark(
             INSERT INTO pdf_marks
                 (
                     invoice_file_id, invoice_id, allocation_id, page_number,
-                    x_ratio, y_ratio, mark_type, label, memo, created_at, updated_at
+                    x_ratio, y_ratio, x_pt, y_pt, page_width_pt, page_height_pt,
+                    mark_type, label, memo, created_at, updated_at
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(invoice_file_id),
@@ -831,6 +838,10 @@ def create_pdf_mark(
                 int(page_number),
                 float(x_ratio),
                 float(y_ratio),
+                float(x_pt),
+                float(y_pt),
+                float(page_width_pt),
+                float(page_height_pt),
                 mark_type,
                 label,
                 memo,
@@ -849,17 +860,36 @@ def delete_pdf_mark(mark_id: int) -> None:
     add_audit_log("PDFマーク削除", "pdf_marks", int(mark_id), "")
 
 
-def update_pdf_mark_position(mark_id: int, x_ratio: float, y_ratio: float) -> None:
+def update_pdf_mark_position(
+    mark_id: int,
+    x_ratio: float,
+    y_ratio: float,
+    x_pt: float,
+    y_pt: float,
+    page_width_pt: float,
+    page_height_pt: float,
+) -> None:
     if not 0 <= x_ratio <= 1 or not 0 <= y_ratio <= 1:
+        raise ValueError("PDFマーク位置がページ範囲外です。")
+    if not (0 <= x_pt <= page_width_pt) or not (0 <= y_pt <= page_height_pt) or page_width_pt <= 0 or page_height_pt <= 0:
         raise ValueError("PDFマーク位置がページ範囲外です。")
     with get_connection() as conn:
         conn.execute(
             """
             UPDATE pdf_marks
-            SET x_ratio = ?, y_ratio = ?, updated_at = ?
+            SET x_ratio = ?, y_ratio = ?, x_pt = ?, y_pt = ?, page_width_pt = ?, page_height_pt = ?, updated_at = ?
             WHERE id = ?
             """,
-            (float(x_ratio), float(y_ratio), now_text(), int(mark_id)),
+            (
+                float(x_ratio),
+                float(y_ratio),
+                float(x_pt),
+                float(y_pt),
+                float(page_width_pt),
+                float(page_height_pt),
+                now_text(),
+                int(mark_id),
+            ),
         )
     add_audit_log("PDFマーク位置更新", "pdf_marks", int(mark_id), f"{x_ratio:.4f},{y_ratio:.4f}")
 
