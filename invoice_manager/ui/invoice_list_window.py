@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from tkinter import messagebox, ttk
 
@@ -28,10 +29,17 @@ from invoice_manager.utils.money_utils import format_amount
 
 
 class InvoiceListWindow(tk.Toplevel):
-    def __init__(self, master) -> None:
+    def __init__(
+        self,
+        master,
+        on_close: Callable[[], None] | None = None,
+        open_hub: Callable[[tk.Toplevel], None] | None = None,
+    ) -> None:
         super().__init__(master)
         self.title("請求一覧")
         self.geometry("1320x700")
+        self.on_close = on_close
+        self.open_hub_callback = open_hub
         self.invoice_ids: dict[str, int] = {}
         self.selected_project_var = tk.StringVar(value="すべて")
         self.project_options = {"すべて": None}
@@ -63,11 +71,13 @@ class InvoiceListWindow(tk.Toplevel):
         self._build_filters()
         self._build_tree()
         self._build_actions()
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.refresh()
 
     def _build_filters(self) -> None:
         frame = tk.Frame(self, padx=10, pady=8)
         frame.pack(fill=tk.X)
+        frame.columnconfigure(10, weight=1)
         tk.Label(frame, text="工事選択").grid(row=0, column=0, sticky=tk.W)
         self.project_combo = ttk.Combobox(
             frame,
@@ -129,6 +139,23 @@ class InvoiceListWindow(tk.Toplevel):
         )
         self.sort_combo.grid(row=1, column=6, sticky=tk.W, padx=4, pady=(8, 0))
         self.sort_combo.bind("<<ComboboxSelected>>", self.on_filter_selected)
+        if self.open_hub_callback is not None:
+            tk.Button(frame, text="管理メニュー", command=self.open_hub).grid(
+                row=0,
+                column=10,
+                sticky=tk.E,
+                padx=(12, 0),
+            )
+
+    def open_hub(self) -> None:
+        if self.open_hub_callback is not None:
+            self.open_hub_callback(self)
+
+    def close_window(self) -> None:
+        if self.on_close is not None:
+            self.on_close()
+            return
+        self.destroy()
 
     def load_project_options(self) -> None:
         self.project_options = {"すべて": None}

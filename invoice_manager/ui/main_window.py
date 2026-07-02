@@ -24,7 +24,16 @@ def run_app() -> None:
         root = TkinterDnD.Tk()
     except Exception:
         root = tk.Tk()
-    MainWindow(root)
+    root.withdraw()
+
+    def open_hub(parent) -> None:
+        dialog = tk.Toplevel(parent)
+        MainWindow(dialog)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.wait_window()
+
+    InvoiceListWindow(root, on_close=root.destroy, open_hub=open_hub)
     root.mainloop()
 
 
@@ -39,7 +48,6 @@ class MainWindow:
 
         buttons = [
             ("CSV + zip取込", self.open_import),
-            ("請求一覧", self.open_invoice_list),
             ("工種コードマスタ", self.open_work_type_master),
             ("取引先別工種候補", self.open_vendor_work_type_candidates),
             ("Digital Billderを開く", self.open_digital_billder),
@@ -50,9 +58,6 @@ class MainWindow:
 
     def open_import(self) -> None:
         ImportWindow(self.root)
-
-    def open_invoice_list(self) -> None:
-        InvoiceListWindow(self.root)
 
     def open_work_type_master(self) -> None:
         WorkTypeMasterWindow(self.root)
