@@ -10,3 +10,7 @@ env/
 
 data/
 Sample/
+
+build/
+dist/
+共有用/*.png

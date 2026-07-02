@@ -1,0 +1,154 @@
+起動画面変更 調査報告
+
+1. 前提
+
+対象プロジェクト:
+Digital Billder請求書 補助台帳アプリ
+
+現在の起動仕様:
+- app.py の GUI 起動時に invoice_manager.ui.main_window.run_app() を呼ぶ。
+- run_app() が Tk ルートを作成し、MainWindow(root) を表示する。
+- MainWindow は「請求書管理」ハブ画面として動作している。
+- MainWindow から CSV + zip取込、請求一覧、工種コードマスタ、取引先別工種候補、Digital Billderを開く、Excel出力を起動する。
+
+ユーザー希望:
+- 起動直後は「請求一覧」を直接開きたい。
+- 旧ハブ画面は廃止しない。
+- 旧ハブ画面は、請求一覧ウィンドウ右上のボタンから開く。
+- ただし、請求一覧は起動直後に表示されるため、旧ハブ画面側の「請求一覧」ボタンは消す。
+- 一覧確認が最優先。
+- ハブ画面はテスト運用としてモーダル表示にする。
+- 請求一覧を閉じたらアプリ全体を終了する。
+- 今回は調査、報告、再指示、実装の順で進める。
+
+2. 方針
+
+最小差分で実装する。
+既存の MainWindow は廃止しない。
+既存の各機能ウィンドウも基本的にそのまま使う。
+起動経路だけを変更し、請求一覧を最初に表示する。
+
+循環 import を避けるため、InvoiceListWindow から MainWindow を直接 import しない方針がよい。
+具体的には、main_window.py 側でハブ表示関数を持ち、InvoiceListWindow には open_hub コールバックを渡す。
+
+モーダル表示は、ハブ画面を開いたら請求一覧を操作できない状態にする。
+実装上は transient、grab_set、wait_window の組み合わせを使う想定。
+
+3. 実装構想
+
+主な変更候補:
+
+- invoice_manager/ui/main_window.py
+  - run_app() を変更する。
+  - Tk ルート作成後、root.withdraw() で空の親ウィンドウを隠す。
+  - InvoiceListWindow(root, on_close=root.destroy, open_hub=...) を起動する。
+  - open_hub 側で MainWindow をモーダル表示する。
+  - MainWindow のボタン一覧から「請求一覧」を削除する。
+  - MainWindow を Toplevel 化するか、既存構造を保ちながらモーダル表示可能にするかは実装前に判断する。
+
+- invoice_manager/ui/invoice_list_window.py
+  - __init__ に on_close と open_hub を任意引数として追加する。
+  - 右上に「管理メニュー」などのボタンを追加する。
+  - ボタン押下で open_hub を呼ぶ。
+  - WM_DELETE_WINDOW で on_close を呼び、起動直後の請求一覧を閉じたらアプリ全体終了にする。
+
+- README.md
+  - GUI起動時は請求一覧を最初に開く旨を反映する。
+
+- SPECIFICATIONS.md
+  - 起動直後の画面仕様と、請求一覧から管理メニューを開く仕様を反映する。
+
+4. 着手方法
+
+推奨する作業順:
+
+1. git status --short で作業ツリー確認。
+2. README.md と SPECIFICATIONS.md を確認し、仕様と実装内容のズレを避ける。
+3. main_window.py の run_app() と MainWindow の責務を確認する。
+4. invoice_list_window.py の初期化、フィルタ行、操作ボタン配置を確認する。
+5. 最小差分で以下を実装する。
+   - 起動時に請求一覧を開く。
+   - 請求一覧右上にハブ起動ボタンを置く。
+   - ハブをモーダル表示する。
+   - ハブから請求一覧ボタンを外す。
+   - 請求一覧を閉じたら root.destroy() する。
+6. python -m compileall app.py invoice_manager を実行する。
+7. 可能なら python app.py でGUI起動確認する。
+8. 小さなphase完了としてコミットする。
+
+5. 最終着地点
+
+短期の着地点:
+- アプリ起動直後に請求一覧が表示される。
+- 請求一覧からハブ画面を開ける。
+- ハブ画面はモーダルで開く。
+- ハブ画面には請求一覧ボタンがない。
+- 既存の取込、工種コードマスタ、取引先別工種候補、Digital Billder、Excel出力の導線は維持される。
+- 請求一覧を閉じるとアプリが終了する。
+
+中長期の構想:
+- ハブ画面を最終的には独立したメニュー画面として残すのではなく、請求一覧側の操作導線へ統合していく。
+- 画面再構築は後日行う。
+- その際、MainWindow の「起動ルート」と「ハブUI」の責務分離を検討する。
+- 共通のモーダル表示ヘルパーを作ると保守性が上がる可能性がある。
+
+6. 今回調査の報告
+
+確認した起動経路:
+- app.py
+  - GUI起動時に initialize_database() を実行後、run_app() を呼んでいる。
+- invoice_manager/ui/main_window.py
+  - run_app() が TkinterDnD.Tk() または tk.Tk() を作成する。
+  - MainWindow(root) を生成する。
+  - root.mainloop() を開始する。
+- MainWindow
+  - root.title("請求書管理")
+  - root.geometry("420x380")
+  - ハブ画面のボタンを縦に配置している。
+
+確認した現在のハブボタン:
+- CSV + zip取込
+- 請求一覧
+- 工種コードマスタ
+- 取引先別工種候補
+- Digital Billderを開く
+- Excel出力
+
+確認した請求一覧画面:
+- invoice_manager/ui/invoice_list_window.py の InvoiceListWindow は tk.Toplevel。
+- 起動時に各種フィルタ候補をロードし、フィルタ、一覧ツリー、操作ボタンを構築する。
+- 現在の操作ボタンは画面下部にある。
+- 画面右上にハブ起動ボタンを追加する場合は、フィルタ行の右側に置くのが最小差分になりやすい。
+
+確認したモーダル実装状況:
+- 既存コード内で transient、grab_set、wait_window はすでに複数箇所で使われている。
+- そのため、ハブ画面のモーダル化も既存パターンに合わせて実装できる。
+
+確認した注意点:
+- SummaryWindow は存在するが、現状 MainWindow からは呼ばれていない。
+- ユーザーが挙げた「集計」を今回の導線に含める場合、現在未接続の SummaryWindow を新たに接続する仕様変更になる。
+- 今回の実装で含めるかどうかは、実装前に確認したほうがよい。
+
+保守性評価:
+- 小規模アプリとしては保守可能な状態。
+- DB、repositories、services、ui の分離はできている。
+- 各画面は Toplevel クラスとして分かれている。
+- 一方で、MainWindow が「起動ルート」と「ハブ画面」の責務を同時に持っているため、起動画面変更では責務が混ざりやすい。
+- invoice_list_window.py と invoice_detail_window.py は大きくなっており、今後UI再構築時には変更衝突や見通し低下が起きやすい。
+- モーダル表示の処理が各画面に散らばっているため、将来的には共通化の余地がある。
+- GUI操作の自動テストは見当たらないため、起動順やモーダル挙動は実機確認が必要。
+
+現在の作業ツリー状態:
+- ソースの未コミット差分はない。
+- 未追跡ファイルとして以下が残っている。
+  - DigitalBuileder_GR.spec
+  - build/
+  - dist/
+  - 共有用/
+  - 起動.bat
+
+直近コミット:
+- 9a57056 Store PDF marks with page coordinates
+- 3418979 Remove local launch batch
+- c14ac99 Add marked PDF export and coordinate plan
+- e61888b Add PDF mark placement to invoice detail

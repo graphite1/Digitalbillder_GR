@@ -1,0 +1,168 @@
+起動画面変更 実装ログ
+
+作業日:
+2026-07-02
+
+対象プロジェクト:
+Digital Billder請求書 補助台帳アプリ
+
+コミット:
+2cb1bbb Open invoice list on startup
+
+目的:
+- アプリ起動直後に、従来のハブ画面ではなく請求一覧画面を表示する。
+- 旧ハブ画面は廃止せず、請求一覧画面右上の「管理メニュー」ボタンから開けるようにする。
+- ハブ画面はモーダル表示にする。
+- 請求一覧画面を閉じたら、アプリ全体を終了する。
+- ハブ画面側の「請求一覧」ボタンは削除する。
+
+変更ファイル:
+- README.md
+- SPECIFICATIONS.md
+- invoice_manager/ui/main_window.py
+- invoice_manager/ui/invoice_list_window.py
+
+実装内容:
+
+1. 起動直後の表示画面変更
+
+invoice_manager/ui/main_window.py の run_app() を変更した。
+
+変更前:
+- Tk ルート作成後、MainWindow(root) を直接表示していた。
+- そのため起動直後は「請求書管理」ハブ画面が表示されていた。
+
+変更後:
+- Tk ルート作成後、root.withdraw() で親ウィンドウを非表示にした。
+- InvoiceListWindow(root, on_close=root.destroy, open_hub=open_hub) を起動するようにした。
+- これにより、アプリ起動直後は請求一覧画面が表示される。
+
+2. ハブ画面のモーダル表示
+
+invoice_manager/ui/main_window.py の run_app() 内に open_hub(parent) を追加した。
+
+open_hub の処理:
+- tk.Toplevel(parent) でハブ用の子ウィンドウを作成する。
+- MainWindow(dialog) で既存ハブ画面をその子ウィンドウ上に構築する。
+- dialog.transient(parent) を設定する。
+- dialog.grab_set() を実行してモーダル化する。
+- dialog.wait_window() でハブ画面が閉じるまで待機する。
+
+これにより、管理メニュー表示中は請求一覧側を操作できない。
+
+3. ハブ画面から請求一覧ボタンを削除
+
+invoice_manager/ui/main_window.py の MainWindow ボタン一覧から「請求一覧」を削除した。
+
+残した導線:
+- CSV + zip取込
+- 工種コードマスタ
+- 取引先別工種候補
+- Digital Billderを開く
+- Excel出力
+
+削除した導線:
+- 請求一覧
+
+理由:
+- 起動直後に請求一覧が表示されるため、ハブから請求一覧を開く導線は不要。
+
+4. 請求一覧画面に管理メニューボタンを追加
+
+invoice_manager/ui/invoice_list_window.py の InvoiceListWindow に open_hub 引数を追加した。
+
+追加した引数:
+- on_close
+- open_hub
+
+open_hub が渡された場合のみ、フィルタ行右側に「管理メニュー」ボタンを表示するようにした。
+
+ボタン押下時:
+- InvoiceListWindow.open_hub() を呼ぶ。
+- open_hub_callback(self) を実行する。
+- main_window.py 側の open_hub(parent) が呼ばれ、ハブ画面がモーダル表示される。
+
+5. 請求一覧を閉じたらアプリ全体終了
+
+invoice_manager/ui/invoice_list_window.py に close_window() を追加した。
+
+処理:
+- on_close が指定されていれば on_close() を呼ぶ。
+- on_close がなければ従来どおり self.destroy() する。
+
+run_app() から起動した請求一覧には on_close=root.destroy を渡している。
+そのため、起動直後の請求一覧を閉じるとアプリ全体が終了する。
+
+6. 循環 import 対策
+
+InvoiceListWindow から MainWindow を直接 import しない構成にした。
+
+理由:
+- main_window.py は InvoiceListWindow を import している。
+- invoice_list_window.py から main_window.py を import すると循環 import になる可能性がある。
+
+対応:
+- InvoiceListWindow には open_hub コールバックだけを渡す。
+- MainWindow の生成処理は main_window.py 側に残す。
+
+7. 仕様書更新
+
+README.md に以下の趣旨を追加した。
+- GUI起動時は請求一覧画面を最初に表示する。
+- 管理メニューから取込やマスタ画面を開く。
+
+SPECIFICATIONS.md の請求一覧画面仕様に以下を追加した。
+- GUI起動時は請求一覧画面を最初に表示する。
+- 請求一覧画面を閉じるとアプリ全体を終了する。
+- 旧管理メニューは請求一覧画面の「管理メニュー」ボタンからモーダル表示する。
+- 旧管理メニューから請求一覧画面は開かない。
+- 操作項目に「管理メニュー」を追加した。
+
+確認内容:
+
+1. 構文確認
+
+実行コマンド:
+python -m compileall app.py invoice_manager
+
+結果:
+成功。
+
+2. GUI起動確認
+
+実行内容:
+- python app.py を短時間起動した。
+- 起動後すぐにエラー終了しないことを確認した。
+- 確認後、起動したプロセスは停止した。
+
+結果:
+即時エラー終了なし。
+
+注意点:
+- GUI画面上でのボタン押下、モーダル操作、閉じる操作の手動確認は別途行うとよい。
+
+触っていないもの:
+- PDFマーク座標保存機能
+- marked PDF export 周辺
+- invoice_manager/services/export_marked_pdf.py
+- invoice_manager/ui/invoice_detail_window.py
+- invoice_manager/db.py
+- invoice_manager/repositories.py
+- build/
+- dist/
+- DigitalBuileder_GR.spec
+- 起動.bat
+
+作業後の git status:
+- ソースの未コミット差分なし。
+- 未追跡ファイルは以下が残っている。
+  - DigitalBuileder_GR.spec
+  - build/
+  - dist/
+  - 共有用/
+  - 起動.bat
+
+実装後の直近コミット:
+- 2cb1bbb Open invoice list on startup
+- 9a57056 Store PDF marks with page coordinates
+- 3418979 Remove local launch batch
