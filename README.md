@@ -58,6 +58,17 @@ python app.py --export --month 2026-05
 python app.py
 ```
 
+## exe配布方針
+
+他のPCへ配布する場合は、PyInstallerのonedir形式でexe化し、生成されたフォルダ全体をzip化します。
+
+- `DigitalBuileder_GR.exe` 単体では配布しません。
+- `DigitalBuileder_GR.exe` と `_internal/` を同じフォルダに入れた状態で配布します。
+- 配布zipには `data/`、`build/`、既存の `dist/`、`__pycache__/` を含めません。
+- ウイルス対策ソフトの誤検知を減らすため、UPX圧縮は使いません。
+- 誤検知を完全に防ぐ必要がある場合は、コード署名を行います。
+- exeビルドが環境側の保護機能で失敗する場合は、ソース配布zipを代替とします。
+
 ## 開発ルール
 
 - 最小差分で修正します。
