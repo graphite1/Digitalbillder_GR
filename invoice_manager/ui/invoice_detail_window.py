@@ -34,11 +34,19 @@ from invoice_manager.services.export_marked_pdf import export_marked_pdf
 from invoice_manager.utils.file_size_utils import format_file_size
 from invoice_manager.utils.date_utils import format_billing_month
 from invoice_manager.utils.file_safety import validate_original_pdf_path
-from invoice_manager.utils.money_utils import format_amount
+from invoice_manager.utils.money_utils import format_amount, tax_excluded_amount
 
 
 class InvoiceDetailWindow(tk.Toplevel):
-    def __init__(self, master, invoice_id: int, on_saved=None, invoice_ids: list[int] | None = None, current_index: int = 0) -> None:
+    def __init__(
+        self,
+        master,
+        invoice_id: int,
+        on_saved=None,
+        invoice_ids: list[int] | None = None,
+        current_index: int = 0,
+        amount_display_mode: str = "税抜",
+    ) -> None:
         super().__init__(master)
         self.invoice_id = invoice_id
         self.on_saved = on_saved
@@ -49,7 +57,9 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.file_ids: dict[str, str] = {}
         self.file_db_ids: dict[str, int] = {}
         self.allocation_ids: dict[str, int] = {}
+        self.allocation_amounts: dict[str, int] = {}
         self.work_type_options: dict[str, int] = {}
+        self.amount_display_mode = amount_display_mode
         self.pdf_path: str | None = None
         self.current_invoice_file_id: int | None = None
         self.pdf_page_index = 0
@@ -117,9 +127,12 @@ class InvoiceDetailWindow(tk.Toplevel):
             ("担当", "contact"),
         ]
         for index, (label, key) in enumerate(info_items):
-            tk.Label(info_frame, text=f"{label}:", fg="#555555").grid(
+            label_widget = tk.Label(info_frame, text=f"{label}:", fg="#555555")
+            label_widget.grid(
                 row=index, column=0, sticky=tk.W, padx=(0, 4), pady=1
             )
+            if key == "total_amount":
+                self.total_amount_label = label_widget
             tk.Label(
                 info_frame,
                 textvariable=self.info_vars[key],
@@ -166,6 +179,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         ]:
             self.allocations.heading(column, text=label)
             self.allocations.column(column, width=width)
+        self.update_amount_headers()
         self.allocations.pack(fill=tk.BOTH, expand=True, pady=6)
         self.allocations.bind("<<TreeviewSelect>>", self.on_allocation_selected)
         buttons = tk.Frame(allocation_frame)
@@ -232,7 +246,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.vendor_name_var.set(row["vendor_name"])
         self.info_vars["billing_month"].set(format_billing_month(row["billing_month"]))
         self.info_vars["invoice_date"].set(row["invoice_date"])
-        self.info_vars["total_amount"].set(f"{format_amount(row['total_amount'])}円")
+        self.info_vars["total_amount"].set(f"{format_amount(self.amount_for_display(self.invoice_total))}円")
         self.info_vars["contact"].set(f"{row['last_name'] or ''} {row['first_name'] or ''}".strip())
         self.memo_text = row["local_memo"] or ""
         self.update_invoice_navigation()
@@ -268,30 +282,54 @@ class InvoiceDetailWindow(tk.Toplevel):
     def load_allocations(self) -> None:
         self.allocations.delete(*self.allocations.get_children())
         self.allocation_ids.clear()
+        self.allocation_amounts.clear()
+        allocated = 0
         for row in list_invoice_allocations(self.invoice_id):
-            display_amount = "" if int(row["amount"]) == 0 else format_amount(row["amount"])
+            stored_amount = int(row["amount"])
+            displayed_amount = self.amount_for_display(stored_amount)
+            allocated += displayed_amount
+            display_amount = "" if stored_amount == 0 else format_amount(displayed_amount)
             item_id = self.allocations.insert(
                 "",
                 tk.END,
                 values=(row["code"], row["name"], display_amount, row["memo"] or "", row["sort_order"]),
             )
             self.allocation_ids[item_id] = int(row["id"])
+            self.allocation_amounts[item_id] = stored_amount
         first_item = next(iter(self.allocations.get_children()), None)
         if first_item:
             self.allocations.selection_set(first_item)
             self.allocations.focus(first_item)
-        allocated = get_invoice_allocation_total(self.invoice_id)
-        remaining = self.invoice_total - allocated
-        if remaining < 0:
+        stored_allocated = get_invoice_allocation_total(self.invoice_id)
+        invoice_total = self.amount_for_display(self.invoice_total)
+        remaining = invoice_total - allocated
+        if self.invoice_total - stored_allocated < 0:
             self.allocation_summary_var.set(
-                f"請求金額: {self.invoice_total:,}円 / 振分合計: {allocated:,}円 / 超過額: {abs(remaining):,}円"
+                f"請求金額: {invoice_total:,}円 / 振分合計: {allocated:,}円 / 超過額: {abs(remaining):,}円"
             )
             self.allocation_summary_var.set(self.allocation_summary_var.get() + "  ※超過しています")
         else:
             self.allocation_summary_var.set(
-                f"請求金額: {self.invoice_total:,}円 / 振分合計: {allocated:,}円 / 未振分額: {remaining:,}円"
+                f"請求金額: {invoice_total:,}円 / 振分合計: {allocated:,}円 / 未振分額: {remaining:,}円"
             )
         self.update_mark_selection_status()
+
+    def amount_for_display(self, amount) -> int:
+        if self.amount_display_mode == "税込":
+            return int(amount)
+        return tax_excluded_amount(amount)
+
+    def update_amount_headers(self) -> None:
+        if hasattr(self, "total_amount_label"):
+            self.total_amount_label.configure(text=f"請求金額({self.amount_display_mode}):")
+        if hasattr(self, "allocations"):
+            self.allocations.heading("amount", text=f"振分金額({self.amount_display_mode})")
+
+    def set_amount_display_mode(self, mode: str) -> None:
+        self.amount_display_mode = mode
+        self.update_amount_headers()
+        self.info_vars["total_amount"].set(f"{format_amount(self.amount_for_display(self.invoice_total))}円")
+        self.load_allocations()
 
     def load_files(self) -> None:
         self.files.delete(*self.files.get_children())
@@ -399,7 +437,8 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         item_id = selection[0]
         values = self.allocations.item(item_id, "values")
-        self.open_allocation_dialog(self.allocation_ids[item_id], values)
+        stored_values = (values[0], values[1], format_amount(self.allocation_amounts[item_id]), values[3], values[4])
+        self.open_allocation_dialog(self.allocation_ids[item_id], stored_values)
 
     def delete_allocation(self) -> None:
         selection = self.allocations.selection()
@@ -443,7 +482,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             state="readonly",
             width=34,
         ).grid(row=0, column=1, sticky=tk.W, padx=4, pady=(12, 4))
-        tk.Label(dialog, text="金額").grid(row=1, column=0, sticky=tk.W, padx=12, pady=4)
+        tk.Label(dialog, text="金額(税込)").grid(row=1, column=0, sticky=tk.W, padx=12, pady=4)
         tk.Entry(dialog, textvariable=amount_var).grid(row=1, column=1, sticky=tk.W, padx=4, pady=4)
         tk.Label(dialog, text="メモ").grid(row=2, column=0, sticky=tk.W, padx=12, pady=4)
         tk.Entry(dialog, textvariable=memo_var, width=36).grid(row=2, column=1, sticky=tk.W, padx=4, pady=4)

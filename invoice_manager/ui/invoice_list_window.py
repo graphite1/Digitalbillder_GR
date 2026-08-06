@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import (
     delete_invoices,
+    get_app_setting,
     recalculate_invoice_billing_months,
     list_billing_months,
     list_invoice_dates,
@@ -15,6 +16,7 @@ from invoice_manager.repositories import (
     list_invoices,
     list_projects,
     list_vendors,
+    set_app_setting,
     update_invoice_billing_month,
     update_invoice_memo,
 )
@@ -25,7 +27,11 @@ from invoice_manager.utils.date_utils import (
     validate_billing_month,
 )
 from invoice_manager.utils.file_safety import validate_original_pdf_path
-from invoice_manager.utils.money_utils import format_amount
+from invoice_manager.utils.money_utils import format_amount, tax_excluded_amount
+
+
+AMOUNT_DISPLAY_SETTING_KEY = "amount_display_mode"
+AMOUNT_DISPLAY_MODES = ("税抜", "税込")
 
 
 class InvoiceListWindow(tk.Toplevel):
@@ -60,6 +66,11 @@ class InvoiceListWindow(tk.Toplevel):
             "金額（高い順）": "amount_desc",
             "金額（低い順）": "amount_asc",
         }
+        saved_amount_display_mode = get_app_setting(AMOUNT_DISPLAY_SETTING_KEY)
+        if saved_amount_display_mode not in AMOUNT_DISPLAY_MODES:
+            saved_amount_display_mode = "税抜"
+            set_app_setting(AMOUNT_DISPLAY_SETTING_KEY, saved_amount_display_mode)
+        self.amount_display_var = tk.StringVar(value=saved_amount_display_mode)
 
         self.memo_var = tk.StringVar()
         self.summary_var = tk.StringVar(value="表示件数: 0件    請求金額合計: 0")
@@ -139,6 +150,16 @@ class InvoiceListWindow(tk.Toplevel):
         )
         self.sort_combo.grid(row=1, column=6, sticky=tk.W, padx=4, pady=(8, 0))
         self.sort_combo.bind("<<ComboboxSelected>>", self.on_filter_selected)
+        tk.Label(frame, text="金額表示").grid(row=1, column=7, sticky=tk.W, padx=(12, 0), pady=(8, 0))
+        self.amount_display_combo = ttk.Combobox(
+            frame,
+            textvariable=self.amount_display_var,
+            values=AMOUNT_DISPLAY_MODES,
+            width=8,
+            state="readonly",
+        )
+        self.amount_display_combo.grid(row=1, column=8, sticky=tk.W, padx=4, pady=(8, 0))
+        self.amount_display_combo.bind("<<ComboboxSelected>>", self.on_amount_display_selected)
         if self.open_hub_callback is not None:
             tk.Button(frame, text="管理メニュー", command=self.open_hub).grid(
                 row=0,
@@ -201,7 +222,7 @@ class InvoiceListWindow(tk.Toplevel):
             "project_name": "工事名",
             "vendor_name": "取引先名",
             "invoice_date": "請求日",
-            "total_amount": "請求金額(税込)",
+            "total_amount": f"請求金額({self.amount_display_var.get()})",
             "file_count": "添付ファイル数",
             "local_memo": "メモ",
             "contact_name": "担当者名",
@@ -291,7 +312,8 @@ class InvoiceListWindow(tk.Toplevel):
         row_count = 0
         for row in list_invoices(filters):
             row_count += 1
-            total_amount += int(row["total_amount"] or 0)
+            display_amount = self.amount_for_display(row["total_amount"] or 0)
+            total_amount += display_amount
             item_id = self.tree.insert(
                 "",
                 tk.END,
@@ -301,7 +323,7 @@ class InvoiceListWindow(tk.Toplevel):
                     row["project_name"],
                     row["vendor_name"],
                     row["invoice_date"],
-                    format_amount(row["total_amount"]),
+                    format_amount(display_amount),
                     row["file_count"],
                     row["local_memo"],
                     row["contact_name"],
@@ -313,6 +335,20 @@ class InvoiceListWindow(tk.Toplevel):
         self.summary_var.set(f"表示件数: {row_count}件    請求金額合計: {format_amount(total_amount)}")
         self.memo_var.set("")
         self._update_action_state()
+
+    def amount_for_display(self, amount) -> int:
+        if self.amount_display_var.get() == "税込":
+            return int(amount)
+        return tax_excluded_amount(amount)
+
+    def on_amount_display_selected(self, _event=None) -> None:
+        mode = self.amount_display_var.get()
+        set_app_setting(AMOUNT_DISPLAY_SETTING_KEY, mode)
+        self.tree.heading("total_amount", text=f"請求金額({mode})")
+        self.refresh()
+        for child in self.winfo_children():
+            if isinstance(child, InvoiceDetailWindow):
+                child.set_amount_display_mode(mode)
 
     def on_filter_selected(self, _event=None) -> None:
         self.refresh()
@@ -381,7 +417,14 @@ class InvoiceListWindow(tk.Toplevel):
             if item_id in selected_items
         ]
         current_index = invoice_ids.index(invoice_id) if invoice_id in invoice_ids else 0
-        InvoiceDetailWindow(self, invoice_id, on_saved=self.refresh, invoice_ids=invoice_ids, current_index=current_index)
+        InvoiceDetailWindow(
+            self,
+            invoice_id,
+            on_saved=self.refresh,
+            invoice_ids=invoice_ids,
+            current_index=current_index,
+            amount_display_mode=self.amount_display_var.get(),
+        )
 
     def save_memo(self) -> None:
         invoice_id = self.selected_invoice_id()
