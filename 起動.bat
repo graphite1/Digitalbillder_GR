@@ -1,3 +1,3 @@
 @echo off
 
-py app.py
+py "%~dp0app.py"

@@ -1,5 +1,7 @@
 # ChatGPT共有用 現状整理
 
+> 2026年7月2日時点の履歴資料です。現行仕様ではありません。最新の内容はルートの `SPECIFICATIONS.md` と `README.md` を参照してください。
+
 ## 概要
 
 対象は「Digital Billder請求書 補助台帳アプリ」です。

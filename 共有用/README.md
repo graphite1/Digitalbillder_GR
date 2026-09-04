@@ -3,16 +3,19 @@
 Windowsローカルで動作する、Digital Billder請求書向けの補助台帳アプリです。
 Digital Billderを置き換えず、CSVとzip内PDF原本をローカルで保存・検索・集計します。
 
-詳細な機能仕様、画面仕様、制限値は [SPECIFICATIONS.md](/C:/Users/s-yobimoto/Codex_Script/DigitalBuileder_GR/SPECIFICATIONS.md) を参照してください。
+詳細な機能仕様、画面仕様、制限値は [SPECIFICATIONS.md](SPECIFICATIONS.md) を参照してください。
 
 ## アプリ方針
 
 - Digital Billder側の登録状態、承認状態、支払状態は管理しません。
 - OCR、LLM、AI分類、外部AI API、PDF本文解析、外部通信は使いません。
 - CSVに含まれる請求情報と、zip内PDF原本をローカルで安全に扱います。
+- CSVの税込原本額を保持したまま、画面内の金額計算と振分入力は税抜を基本にします。
 - 請求一覧、詳細確認、添付PDF参照、メモ、請求月管理、Excel出力を補助します。
+- GUI起動時は請求一覧画面を最初に表示し、管理メニューから取込やマスタ画面を開きます。
 - 請求詳細のPDFプレビュー上で、工種コード振分に対応する確認用マークを配置できます。
 - 請求詳細画面から、マークを重ねた確認用PDFを別ファイルとして出力できます。
+- PDFマーク座標はPDFページ上の実座標を基準に扱い、既存の比率座標データは互換表示します。
 
 ## 請求月ルール
 
@@ -42,6 +45,8 @@ Excel出力では、CSV由来の文字列がExcel数式として実行されな�
 
 - 表示件数と請求金額合計を確認できるようにします。
 - 工事、請求月、取引先、請求日、並び順で絞り込みできるようにします。
+- 更新が終了した工事は請求一覧から非表示にでき、データを削除せず表示へ戻せます。
+- CSV + zip取込後に管理メニューを閉じると、一覧とフィルタ候補を再読込します。
 - 行選択を前提とする操作は、未選択時に実行できないようにします。
 - 詳細確認、メモ編集、請求月変更、添付PDF表示を行単位で実行します。
 - 画面の大改造より、確認にかかる手数を減らす改善を優先します。
@@ -56,6 +61,17 @@ python app.py --export --month 2026-05
 python app.py
 ```
 
+## exe配布方針
+
+他のPCへ配布する場合は、PyInstallerのonedir形式でexe化し、生成されたフォルダ全体をzip化します。
+
+- `DigitalBuileder_GR.exe` 単体では配布しません。
+- `DigitalBuileder_GR.exe` と `_internal/` を同じフォルダに入れた状態で配布します。
+- 配布zipには `data/`、`build/`、既存の `dist/`、`__pycache__/` を含めません。
+- ウイルス対策ソフトの誤検知を減らすため、UPX圧縮は使いません。
+- 誤検知を完全に防ぐ必要がある場合は、コード署名を行います。
+- exeビルドが環境側の保護機能で失敗する場合は、ソース配布zipを代替とします。
+
 ## 開発ルール
 
 - 最小差分で修正します。
@@ -67,14 +83,33 @@ python app.py
 
 ## 開発時の確認
 
+自動テスト:
+
+```bash
+py -B -m unittest discover -s tests -v
+```
+
 構文確認:
 
 ```bash
-python -m compileall app.py invoice_manager
+python -m compileall app.py invoice_manager tests
 ```
 
 通常起動:
 
 ```bash
-python app.py
+起動.bat
 ```
+
+コマンドプロンプトから直接起動する場合は `py app.py` を使用します。
+
+## 操作マニュアルの更新
+
+操作マニュアルの生成元は `tools/manual/` で管理します。
+
+```bash
+py tools/manual/create_screenshots.py
+py tools/manual/create_manual.py
+```
+
+生成後は `docs/電子請求書管理_操作マニュアル.docx` をPDF化し、全ページの余白、改ページ、文字切れを確認します。

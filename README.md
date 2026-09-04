@@ -3,7 +3,7 @@
 Windowsローカルで動作する、Digital Billder請求書向けの補助台帳アプリです。
 Digital Billderを置き換えず、CSVとzip内PDF原本をローカルで保存・検索・集計します。
 
-詳細な機能仕様、画面仕様、制限値は [SPECIFICATIONS.md](/C:/Users/s-yobimoto/Codex_Script/DigitalBuileder_GR/SPECIFICATIONS.md) を参照してください。
+詳細な機能仕様、画面仕様、制限値は [SPECIFICATIONS.md](SPECIFICATIONS.md) を参照してください。
 
 ## アプリ方針
 
@@ -83,14 +83,33 @@ python app.py
 
 ## 開発時の確認
 
+自動テスト:
+
+```bash
+py -B -m unittest discover -s tests -v
+```
+
 構文確認:
 
 ```bash
-python -m compileall app.py invoice_manager
+python -m compileall app.py invoice_manager tests
 ```
 
 通常起動:
 
 ```bash
-python app.py
+起動.bat
 ```
+
+コマンドプロンプトから直接起動する場合は `py app.py` を使用します。
+
+## 操作マニュアルの更新
+
+操作マニュアルの生成元は `tools/manual/` で管理します。
+
+```bash
+py tools/manual/create_screenshots.py
+py tools/manual/create_manual.py
+```
+
+生成後は `docs/電子請求書管理_操作マニュアル.docx` をPDF化し、全ページの余白、改ページ、文字切れを確認します。
