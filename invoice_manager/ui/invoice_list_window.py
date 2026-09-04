@@ -31,6 +31,7 @@ from invoice_manager.utils.money_utils import format_amount, tax_excluded_amount
 
 AMOUNT_DISPLAY_SETTING_KEY = "amount_display_mode"
 AMOUNT_DISPLAY_MODES = ("税抜", "税込")
+PROJECT_SELECTION_SETTING_KEY = "selected_project_id"
 
 
 class InvoiceListWindow(tk.Toplevel):
@@ -74,6 +75,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.memo_var = tk.StringVar()
         self.summary_var = tk.StringVar(value="表示件数: 0件    請求金額合計: 0")
         self.load_project_options()
+        self.restore_project_selection()
         self.load_vendor_options()
         self.load_month_options()
         self.load_invoice_date_options()
@@ -97,7 +99,7 @@ class InvoiceListWindow(tk.Toplevel):
             state="readonly",
         )
         self.project_combo.grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=4)
-        self.project_combo.bind("<<ComboboxSelected>>", self.on_filter_selected)
+        self.project_combo.bind("<<ComboboxSelected>>", self.on_project_filter_selected)
         tk.Label(frame, text="請求月").grid(row=0, column=4, sticky=tk.W, padx=(12, 0))
         self.month_combo = ttk.Combobox(
             frame,
@@ -173,6 +175,7 @@ class InvoiceListWindow(tk.Toplevel):
             self.reload_filter_options()
 
     def close_window(self) -> None:
+        self.save_project_selection()
         if self.on_close is not None:
             self.on_close()
             return
@@ -183,6 +186,26 @@ class InvoiceListWindow(tk.Toplevel):
         for row in list_projects(active_only=True):
             label = f"{row['project_code']}｜{row['project_name']}"
             self.project_options[label] = int(row["id"])
+
+    def restore_project_selection(self) -> None:
+        saved_project_id = get_app_setting(PROJECT_SELECTION_SETTING_KEY)
+        if not saved_project_id:
+            return
+        selected_label = next(
+            (
+                label
+                for label, project_id in self.project_options.items()
+                if project_id is not None and str(project_id) == saved_project_id
+            ),
+            "すべて",
+        )
+        self.selected_project_var.set(selected_label)
+        if selected_label == "すべて":
+            set_app_setting(PROJECT_SELECTION_SETTING_KEY, "")
+
+    def save_project_selection(self) -> None:
+        project_id = self.project_options.get(self.selected_project_var.get())
+        set_app_setting(PROJECT_SELECTION_SETTING_KEY, "" if project_id is None else str(project_id))
 
     def load_vendor_options(self) -> None:
         self.vendor_options = {"すべて": None}
@@ -219,6 +242,7 @@ class InvoiceListWindow(tk.Toplevel):
             combo.configure(values=list(options.keys()))
             if variable.get() not in options:
                 variable.set("すべて")
+        self.restore_project_selection()
         self.refresh()
 
     def _build_tree(self) -> None:
@@ -375,6 +399,10 @@ class InvoiceListWindow(tk.Toplevel):
                 child.set_amount_display_mode(mode)
 
     def on_filter_selected(self, _event=None) -> None:
+        self.refresh()
+
+    def on_project_filter_selected(self, _event=None) -> None:
+        self.save_project_selection()
         self.refresh()
 
     def on_tree_mousewheel(self, event) -> str:
