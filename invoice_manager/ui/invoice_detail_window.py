@@ -17,7 +17,6 @@ from invoice_manager.repositories import (
     delete_invoice_allocation,
     delete_pdf_mark,
     ensure_work_type_codes_for_project,
-    get_invoice_allocation_total,
     get_or_create_pdf_mark_label,
     get_invoice_detail,
     list_invoice_allocations,
@@ -290,6 +289,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.allocations.delete(*self.allocations.get_children())
         self.allocation_ids.clear()
         self.allocation_amounts.clear()
+        allocated = 0
         for row in list_invoice_allocations(self.invoice_id):
             stored_amount = int(row["amount"])
             excluded_value = row["amount_excluded"]
@@ -303,11 +303,11 @@ class InvoiceDetailWindow(tk.Toplevel):
             )
             self.allocation_ids[item_id] = int(row["id"])
             self.allocation_amounts[item_id] = amount_excluded
+            allocated += amount_excluded
         first_item = next(iter(self.allocations.get_children()), None)
         if first_item:
             self.allocations.selection_set(first_item)
             self.allocations.focus(first_item)
-        allocated = get_invoice_allocation_total(self.invoice_id)
         invoice_total = self.invoice_total_excluded
         remaining = invoice_total - allocated
         if remaining < 0:
@@ -459,7 +459,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         delete_invoice_allocation(self.allocation_ids[selection[0]])
         self.load_allocations()
         if self.pdf_path:
-            self.render_pdf_page()
+            self.render_pdf_marks()
 
     def open_allocation_dialog(self, allocation_id: int | None = None, values=None) -> None:
         if not self.work_type_options:
@@ -559,7 +559,10 @@ class InvoiceDetailWindow(tk.Toplevel):
 
     def show_pdf_file(self, path: str) -> None:
         try:
-            self.pdf_path = str(validate_original_pdf_path(path))
+            validated_path = str(validate_original_pdf_path(path))
+            if self.pdf_path == validated_path and self.pdf_image_item is not None:
+                return
+            self.pdf_path = validated_path
             self.pdf_page_index = 0
             self.reset_pdf_pan()
             self.render_pdf_page()
@@ -816,7 +819,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             return "break"
         self.mark_undo_stack.append(int(mark_id))
         self.selected_mark_id = int(mark_id)
-        self.render_pdf_page()
+        self.render_pdf_marks()
         self.update_mark_selection_status()
         return "break"
 
@@ -892,7 +895,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         delete_pdf_mark(mark_id)
         if self.selected_mark_id == mark_id:
             self.selected_mark_id = None
-        self.render_pdf_page()
+        self.render_pdf_marks()
         self.update_mark_selection_status()
 
     def _extract_pdf_mark_id(self, tag: str) -> int | None:

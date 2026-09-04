@@ -10,7 +10,12 @@ from invoice_manager.utils.file_safety import sanitize_path_part
 from invoice_manager.utils.file_hash import sha256_bytes
 
 
-def store_pdf_from_zip(zip_path: Path, item: ZipPdfItem, billing_month: str) -> tuple[Path, str, int]:
+def store_pdf_from_zip(
+    zip_path: Path,
+    item: ZipPdfItem,
+    billing_month: str,
+    zip_file: ZipFile | None = None,
+) -> tuple[Path, str, int]:
     if item.file_size > MAX_PDF_SIZE_BYTES:
         raise ValueError("PDFが大きすぎます。1ファイル100MB以下にしてください。")
     external_id = sanitize_path_part(item.external_id, "unknown_id")
@@ -23,7 +28,10 @@ def store_pdf_from_zip(zip_path: Path, item: ZipPdfItem, billing_month: str) -> 
     else:
         target_dir = DATA_DIR / "originals" / "unset" / external_id
     target_dir.mkdir(parents=True, exist_ok=True)
-    with ZipFile(zip_path) as zip_file:
+    if zip_file is None:
+        with ZipFile(zip_path) as opened_zip:
+            data = opened_zip.read(item.zip_name)
+    else:
         data = zip_file.read(item.zip_name)
     file_hash = sha256_bytes(data)
     target_path = _unique_path(target_dir / file_name, file_hash)

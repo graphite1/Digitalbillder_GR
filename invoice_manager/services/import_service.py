@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zipfile import ZipFile
 
 from invoice_manager.models import ImportResult, PreviewResult
 from invoice_manager.repositories import (
@@ -74,11 +75,21 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
         duplicate_summary=duplicate_summary,
         warnings=warnings,
         errors=errors,
+        source_signature=_source_signature(csv_path, zip_path),
     )
 
 
-def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str = "") -> ImportResult:
-    preview = preview_import(csv_path, zip_path, billing_month)
+def execute_import(
+    csv_path: Path,
+    zip_path: Path,
+    billing_month: str,
+    memo: str = "",
+    prepared_preview: PreviewResult | None = None,
+) -> ImportResult:
+    if prepared_preview is not None and prepared_preview.source_signature == _source_signature(csv_path, zip_path):
+        preview = prepared_preview
+    else:
+        preview = preview_import(csv_path, zip_path, billing_month)
     batch_billing_month = preview.detected_billing_months[0] if len(preview.detected_billing_months) == 1 else ""
     import_batch_id = create_import_batch(
         billing_month=batch_billing_month,
@@ -99,25 +110,31 @@ def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str
     inserted_count = 0
     file_count = 0
     importable_ids = preview.duplicate_summary.new_ids
-    for row in preview.csv_rows:
-        if row.external_id not in importable_ids:
-            continue
-        row_billing_month = billing_month_from_invoice_date(row.invoice_date)
-        invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
-        inserted_count += 1
-        for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
-            stored_path, file_hash, file_size = store_pdf_from_zip(zip_path, item, row_billing_month)
-            inserted = insert_invoice_file(
-                invoice_id=invoice_id,
-                original_file_name=item.original_file_name,
-                stored_file_path=stored_path,
-                file_type=item.file_type,
-                file_hash=file_hash,
-                file_size=file_size,
-            )
-            if inserted:
-                file_count += 1
-                add_audit_log("PDF保存", "invoices", invoice_id, str(stored_path))
+    with ZipFile(zip_path) as zip_file:
+        for row in preview.csv_rows:
+            if row.external_id not in importable_ids:
+                continue
+            row_billing_month = billing_month_from_invoice_date(row.invoice_date)
+            invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
+            inserted_count += 1
+            for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
+                stored_path, file_hash, file_size = store_pdf_from_zip(
+                    zip_path,
+                    item,
+                    row_billing_month,
+                    zip_file=zip_file,
+                )
+                inserted = insert_invoice_file(
+                    invoice_id=invoice_id,
+                    original_file_name=item.original_file_name,
+                    stored_file_path=stored_path,
+                    file_type=item.file_type,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                )
+                if inserted:
+                    file_count += 1
+                    add_audit_log("PDF保存", "invoices", invoice_id, str(stored_path))
 
     return ImportResult(
         preview=preview,
@@ -130,3 +147,12 @@ def execute_import(csv_path: Path, zip_path: Path, billing_month: str, memo: str
 def _detect_billing_months(rows) -> list[str]:
     months = {billing_month_from_invoice_date(row.invoice_date) for row in rows if (row.invoice_date or "").strip()}
     return sorted(month for month in months if month)
+
+
+def _source_signature(csv_path: Path, zip_path: Path) -> tuple[tuple[str, int, int], tuple[str, int, int]]:
+    return (_file_signature(csv_path), _file_signature(zip_path))
+
+
+def _file_signature(path: Path) -> tuple[str, int, int]:
+    stat = path.stat()
+    return str(path.resolve()), stat.st_size, stat.st_mtime_ns

@@ -286,6 +286,25 @@ def find_duplicate_candidate(row: InvoiceCsvRow):
         ).fetchone()
 
 
+def list_invoice_duplicate_references() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT
+                    invoices.external_id,
+                    invoices.invoice_date,
+                    invoices.total_amount,
+                    projects.project_code,
+                    vendors.vendor_name
+                FROM invoices
+                JOIN projects ON projects.id = invoices.project_id
+                JOIN vendors ON vendors.id = invoices.vendor_id
+                """
+            ).fetchall()
+        )
+
+
 def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int) -> int:
     project_id = get_or_create_project(row.project_code, row.project_name)
     vendor_id = get_or_create_vendor(row.vendor_name)
@@ -591,29 +610,41 @@ def list_work_type_codes(project_id: int | None = None, active_only: bool = Fals
 def ensure_work_type_codes_for_project(project_id: int) -> int:
     timestamp = now_text()
     with get_connection() as conn:
-        conn.executemany(
-            """
-            UPDATE work_type_codes
-            SET name = ?, sort_order = ?, updated_at = ?
-            WHERE project_id = ? AND code = ?
-            """,
-            [
-                (name, index, timestamp, int(project_id), code)
-                for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1)
-            ],
-        )
+        existing = {
+            row["code"]: row
+            for row in conn.execute(
+                "SELECT code, name, sort_order FROM work_type_codes WHERE project_id = ?",
+                (int(project_id),),
+            ).fetchall()
+        }
+        updates = []
+        inserts = []
+        for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1):
+            current = existing.get(code)
+            if current is None:
+                inserts.append((int(project_id), code, name, index, timestamp, timestamp))
+            elif current["name"] != name or int(current["sort_order"]) != index:
+                updates.append((name, index, timestamp, int(project_id), code))
+        if updates:
+            conn.executemany(
+                """
+                UPDATE work_type_codes
+                SET name = ?, sort_order = ?, updated_at = ?
+                WHERE project_id = ? AND code = ?
+                """,
+                updates,
+            )
+        if not inserts:
+            return 0
         cur = conn.executemany(
             """
             INSERT OR IGNORE INTO work_type_codes
                 (project_id, code, name, sort_order, is_active, created_at, updated_at)
             VALUES (?, ?, ?, ?, 1, ?, ?)
             """,
-            [
-                (int(project_id), code, name, index, timestamp, timestamp)
-                for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1)
-            ],
+            inserts,
         )
-    return int(cur.rowcount)
+        return int(cur.rowcount)
 
 
 def save_work_type_code(

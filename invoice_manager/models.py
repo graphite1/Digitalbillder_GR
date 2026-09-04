@@ -73,6 +73,7 @@ class PreviewResult:
     duplicate_summary: DuplicateSummary = field(default_factory=DuplicateSummary)
     warnings: list[str] = field(default_factory=list)
     errors: list[ImportErrorItem] = field(default_factory=list)
+    source_signature: tuple[tuple[str, int, int], tuple[str, int, int]] | None = None
 
 
 @dataclass(frozen=True)

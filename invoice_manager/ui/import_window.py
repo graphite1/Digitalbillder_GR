@@ -103,7 +103,13 @@ class ImportWindow(tk.Toplevel):
             confirmed = messagebox.askyesno("取込確認", "表示中のプレビュー内容で取込を実行しますか？")
             if not confirmed:
                 return
-            result = execute_import(Path(self.csv_var.get()), Path(self.zip_var.get()), "", self.memo_var.get())
+            result = execute_import(
+                Path(self.csv_var.get()),
+                Path(self.zip_var.get()),
+                "",
+                self.memo_var.get(),
+                prepared_preview=self.preview,
+            )
             self.preview = result.preview
             self.render_preview()
             self.update_month_summary(self.preview.detected_billing_months)
