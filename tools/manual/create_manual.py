@@ -18,7 +18,7 @@ WORK_DIR = REPO_ROOT / "build" / "manual_work"
 SCREENSHOT_DIR = WORK_DIR / "screenshots"
 CROP_DIR = WORK_DIR / "crops"
 DOCS_DIR = REPO_ROOT / "docs"
-DIST_MANUAL_DIR = REPO_ROOT / "dist" / "配布用_20260806" / "DigitalBuileder_GR" / "マニュアル"
+DIST_MANUAL_DIR = REPO_ROOT / "dist" / "配布用_20260904" / "DigitalBuileder_GR" / "マニュアル"
 OUTPUT_DOCX = DOCS_DIR / "電子請求書管理_操作マニュアル.docx"
 DIST_DOCX = DIST_MANUAL_DIR / OUTPUT_DOCX.name
 LOGO_PATH = REPO_ROOT / "assets" / "DigitalBuileder_GR.png"
@@ -454,7 +454,7 @@ def build_manual() -> None:
     set_run_font(meta.add_run("2026年9月版"), size=11, color=NAVY, bold=True)
     scope = doc.add_paragraph()
     scope.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    set_run_font(scope.add_run("CSV＋zip取込 / 請求一覧 / 税表示切替 / 工種振分 / 工事表示 / PDF確認 / Excel出力"), size=10, color=MUTED)
+    set_run_font(scope.add_run("CSV＋zip取込 / 取込履歴 / 請求一覧 / 税表示切替 / 工種振分 / 工事表示 / PDF確認 / Excel出力"), size=10, color=MUTED)
     note = doc.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
     note.paragraph_format.space_before = Pt(30)
@@ -473,8 +473,9 @@ def build_manual() -> None:
         doc,
         (
             "Digital Billderから出力したCSVと、請求書PDFをまとめたzipをローカルへ取り込みます。",
-            "請求一覧を工事・請求月・取引先・請求日で絞り込み、詳細やPDFを確認します。",
+            "請求一覧を工事・請求月・取引先・請求日で絞り込み、詳細・PDF・取込履歴を確認します。",
             "請求金額を工種コード別に振り分け、PDFへ確認用マークを配置します。",
+            "完了工事はアーカイブして、自動処理と変更の対象から外します。",
             "月別の請求一覧と工種振分をExcelへ出力します。",
         ),
     )
@@ -494,7 +495,6 @@ def build_manual() -> None:
             ["消費税率", "10%固定（試験運用）"],
             ["税抜換算", "税込額 × 100 ÷ 110 の1円未満切り捨て"],
             ["初期表示", "税抜。切替後の状態は保存されます"],
-            ["金額データ", "CSVとExcelは税込。DBは税込原本額と税抜計算額を保持"],
         ],
         [2700, 6660],
     )
@@ -513,7 +513,7 @@ def build_manual() -> None:
     add_callout(
         doc,
         "フォルダ注意",
-        "起動.bat、app.py、invoice_manager、assets、dataの配置を変えずに使用します。他PC向けexe配布版では、exeと_internalを同じフォルダに置きます。",
+        "起動.bat、app.py、invoice_manager、assets、dataの配置を変えずに使用します。現行運用はEXEではなく、起動.batから開始します。",
         caution=True,
     )
     doc.add_paragraph("起動できないとき", style="Heading 2")
@@ -537,17 +537,11 @@ def build_manual() -> None:
             "請求一覧右上の［管理メニュー］を押し、［CSV＋zip取込］を開きます。",
             "［CSVファイル選択］と［zipファイル選択］で対象ファイルを指定します。ドラッグ＆ドロップも利用できます。",
             "請求月の自動判定を確認し、必要ならメモを入力します。",
-            "［プレビュー］を押し、一致件数・新規件数・重複候補・エラー件数を確認します。",
+            "［プレビュー］を押し、一致件数・新規件数・重複候補・エラー件数を確認します。CSVの必須列は［請求金額(税込)］で、画面の金額集計は税抜です。",
+            "アーカイブ工事スキップ件数がある場合は、対象工事を確認します。アーカイブ中の工事は自動で表示へ戻りません。",
             "問題がなければ［取込実行］を押し、確認ダイアログで実行します。",
         ),
     )
-    add_callout(
-        doc,
-        "金額の扱い",
-        "CSVの必須列は［請求金額(税込)］です。取込画面の請求金額合計、工事別合計、取引先別合計は税抜で、表示切替の対象外です。",
-        caution=True,
-    )
-
     add_page_break(doc)
     add_page_title(doc, "4", "請求一覧を確認する", "絞り込み、並び替え、詳細確認をこの画面から行います")
     add_picture(doc, crops["list_main"], 6.15, "請求一覧上部（税抜表示のサンプル）")
@@ -568,7 +562,7 @@ def build_manual() -> None:
         (
             "行を選択すると、［詳細を開く］などのボタンが使用可能になります。",
             "複数行を選択して詳細を開くと、詳細画面の［前の請求］［次の請求］で移動できます。",
-            "［請求月一括再計算(テスト)］は試験用です。通常作業では使用しません。",
+            "［選択工事の請求月再計算(試験)］は、工事を1件選んだ場合だけ実行できます。手動補正した請求月は変更しません。",
         ),
     )
 
@@ -656,7 +650,7 @@ def build_manual() -> None:
     add_callout(doc, "原本保護", "画面上のマークはDBへ保存され、原本PDFには書き込みません。", caution=True)
 
     add_page_break(doc)
-    add_page_title(doc, "8", "管理メニューと出力", "工事表示設定、マスタ管理、月別出力を行います")
+    add_page_title(doc, "8", "管理メニューと出力", "取込履歴、工事アーカイブ、マスタ管理、月別出力を行います")
     table = doc.add_table(rows=1, cols=2)
     set_table_geometry(table, [3600, 5760])
     left = table.cell(0, 0)
@@ -670,9 +664,10 @@ def build_manual() -> None:
     set_run_font(rp.add_run("管理メニュー"), size=12, color=NAVY, bold=True)
     for label, detail in (
         ("CSV＋zip取込", "月次データの取込"),
+        ("取込履歴", "取込件数・エラー・完了状態の確認"),
         ("工種コードマスタ", "工事ごとの工種コード管理"),
         ("取引先別工種候補", "振分候補の優先表示設定"),
-        ("工事表示設定", "完了工事の非表示と再表示"),
+        ("工事表示設定", "完了工事のアーカイブと再表示"),
         ("Digital Billderを開く", "登録済みURLをブラウザで開く"),
         ("Excel出力", "請求月を選んで月別一覧を出力"),
     ):
@@ -681,17 +676,10 @@ def build_manual() -> None:
         set_run_font(pp.add_run(f"{label}: "), size=9.5, color=DARK_BLUE, bold=True)
         set_run_font(pp.add_run(detail), size=9.5)
     set_table_geometry(table, [3600, 5760])
-    doc.add_paragraph("工事表示設定", style="Heading 2")
-    add_body(doc, "更新が終了した工事のチェックを外すと、請求やPDFを削除せず請求一覧から非表示にできます。再びチェックすると表示へ戻ります。非表示工事へ新しい請求を取り込むと、その工事は自動で表示へ戻ります。")
+    doc.add_paragraph("取込履歴と工事表示設定", style="Heading 2")
+    add_body(doc, "［取込履歴］では、開始・完了日時、ファイル名、登録・PDF・エラー件数、状態を確認できます。［工事表示設定］では、工事コードまたは工事名で検索し、請求件数と最終請求日を確認できます。更新が終了した工事は、データを削除せずアーカイブできます。アーカイブ中は取込と変更処理の対象外です。")
     doc.add_paragraph("Excel出力", style="Heading 2")
-    add_numbered_steps(
-        doc,
-        (
-            "請求一覧の［管理メニュー］を押し、［Excel出力］を選びます。",
-            "出力する請求月を選び、［出力］を押します。",
-            "保存完了メッセージに表示されたファイルを確認します。",
-        ),
-    )
+    add_body(doc, "［Excel出力］で請求月を選んで出力し、完了メッセージに表示されたファイルを確認します。")
     add_callout(doc, "Excel金額", "Excelの請求金額と振分金額は税込です。画面の税抜／税込表示設定には連動しません。", caution=True)
 
     add_page_break(doc)
@@ -703,7 +691,7 @@ def build_manual() -> None:
             ["プレビューボタンが押せない", "CSVとzipの両方を指定します"],
             ["取込エラーがある", "エラー件数とメッセージを確認し、元データを修正して再度プレビューします"],
             ["金額が元CSVと違って見える", "［金額表示］が税抜か税込か確認します。元CSVは税込です"],
-            ["新規工事が選択肢にない", "取込画面と管理メニューを閉じて請求一覧へ戻ります"],
+            ["新規・アーカイブ工事が選択肢にない", "取込画面と管理メニューを閉じます。アーカイブ工事は表示へ戻してから再取込します"],
             ["PDFが表示されない", "添付ファイルが登録されているか、対象行が正しいか確認します"],
             ["工種コードを選べない", "管理メニューの工種コードマスタを管理担当者が確認します"],
             ["Excelの金額が税抜表示と違う", "Excelは税込保存額を出力する仕様です"],
@@ -716,8 +704,7 @@ def build_manual() -> None:
         (
             "起動.bat、app.py、invoice_manager、assets、dataの配置を変えません。",
             "請求情報、取引先情報、PDF原本をメールやGitなどへ不用意に共有しません。",
-            "削除操作の前に、対象の請求と添付PDFを必ず確認します。",
-            "運用データは社内ルールに従って定期的にバックアップします。",
+            "取込、請求月変更・再計算、請求削除の直前にDBが自動バックアップされます。削除対象も必ず確認します。",
             "不明な警告やエラーが出た場合は、画面を閉じる前にスクリーンショットを保存して管理者へ連絡します。",
             "終了するときは請求一覧右上の［×］を押します。保存ダイアログが開いている場合は、先に完了またはキャンセルします。",
         ),
