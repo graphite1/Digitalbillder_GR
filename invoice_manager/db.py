@@ -28,7 +28,13 @@ CREATE TABLE IF NOT EXISTS import_batches (
     csv_hash TEXT,
     zip_hash TEXT,
     imported_at TEXT NOT NULL,
-    memo TEXT
+    memo TEXT,
+    registered_count INTEGER NOT NULL DEFAULT 0,
+    pdf_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    completed_at TEXT,
+    failure_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -196,6 +202,7 @@ def initialize_database() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        _migrate_import_batches_table(conn)
         _migrate_invoices_table(conn)
         _migrate_invoice_files_table(conn)
         _migrate_pdf_marks_table(conn)
@@ -203,6 +210,46 @@ def initialize_database() -> None:
         _migrate_invoice_billing_month_override(conn)
         _migrate_tax_excluded_amounts(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
+
+
+def _migrate_import_batches_table(conn: sqlite3.Connection) -> None:
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(import_batches)").fetchall()]
+    migrations = {
+        "registered_count": "ALTER TABLE import_batches ADD COLUMN registered_count INTEGER NOT NULL DEFAULT 0",
+        "pdf_count": "ALTER TABLE import_batches ADD COLUMN pdf_count INTEGER NOT NULL DEFAULT 0",
+        "error_count": "ALTER TABLE import_batches ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0",
+        "status": "ALTER TABLE import_batches ADD COLUMN status TEXT NOT NULL DEFAULT 'running'",
+        "completed_at": "ALTER TABLE import_batches ADD COLUMN completed_at TEXT",
+        "failure_message": "ALTER TABLE import_batches ADD COLUMN failure_message TEXT",
+    }
+    added = False
+    for name, sql in migrations.items():
+        if name not in columns:
+            conn.execute(sql)
+            added = True
+    if not added:
+        return
+
+    conn.execute(
+        """
+        UPDATE import_batches
+        SET
+            registered_count = (
+                SELECT COUNT(*) FROM invoices WHERE invoices.import_batch_id = import_batches.id
+            ),
+            pdf_count = (
+                SELECT COUNT(*)
+                FROM invoice_files
+                JOIN invoices ON invoices.id = invoice_files.invoice_id
+                WHERE invoices.import_batch_id = import_batches.id
+            ),
+            error_count = (
+                SELECT COUNT(*) FROM import_errors WHERE import_errors.import_batch_id = import_batches.id
+            ),
+            status = 'completed',
+            completed_at = COALESCE(completed_at, imported_at)
+        """
+    )
 
 
 def _migrate_invoices_table(conn: sqlite3.Connection) -> None:

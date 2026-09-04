@@ -129,6 +129,68 @@ def create_import_batch(
         return int(cur.lastrowid)
 
 
+def finalize_import_batch(
+    import_batch_id: int,
+    registered_count: int,
+    pdf_count: int,
+    error_count: int,
+    status: str,
+    failure_message: str = "",
+) -> None:
+    if status not in {"completed", "failed"}:
+        raise ValueError("取込履歴の状態が不正です。")
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE import_batches
+            SET registered_count = ?, pdf_count = ?, error_count = ?,
+                status = ?, completed_at = ?, failure_message = ?
+            WHERE id = ?
+            """,
+            (
+                int(registered_count),
+                int(pdf_count),
+                int(error_count),
+                status,
+                now_text(),
+                failure_message,
+                int(import_batch_id),
+            ),
+        )
+
+
+def list_import_batches() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT
+                    id, imported_at, completed_at, billing_month,
+                    csv_file_name, zip_file_name,
+                    registered_count, pdf_count, error_count,
+                    status, memo, failure_message
+                FROM import_batches
+                ORDER BY imported_at DESC, id DESC
+                """
+            ).fetchall()
+        )
+
+
+def list_import_errors(import_batch_id: int) -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT row_number, error_type, message, raw_data
+                FROM import_errors
+                WHERE import_batch_id = ?
+                ORDER BY id ASC
+                """,
+                (int(import_batch_id),),
+            ).fetchall()
+        )
+
+
 def save_import_errors(import_batch_id: int, errors: list[ImportErrorItem]) -> None:
     if not errors:
         return

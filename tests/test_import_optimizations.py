@@ -49,6 +49,7 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "finalize_import_batch"),
             patch.object(import_service, "create_database_backup"),
             patch.object(import_service, "list_hidden_project_codes", return_value=set()),
         ):
@@ -78,6 +79,7 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "finalize_import_batch"),
             patch.object(import_service, "create_database_backup"),
             patch.object(import_service, "list_hidden_project_codes", return_value=set()),
         ):
@@ -120,6 +122,7 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "finalize_import_batch"),
             patch.object(import_service, "create_database_backup"),
             patch.object(import_service, "list_hidden_project_codes", return_value=set()),
             patch.object(import_service, "insert_invoice", return_value=10),
@@ -177,6 +180,43 @@ class ImportOptimizationTests(unittest.TestCase):
         self.assertEqual(preview.archived_skip_count, 1)
         self.assertEqual(preview.total_amount, 0)
         self.assertTrue(any("アーカイブ工事" in warning for warning in preview.warnings))
+
+    def test_execute_import_records_failed_history(self) -> None:
+        row = InvoiceCsvRow(
+            row_number=2,
+            external_id="NEW",
+            project_name="工事A",
+            project_code="P001",
+            vendor_name="取引先A",
+            last_name="",
+            first_name="",
+            email="",
+            phone="",
+            invoice_date="2026-08-20",
+            total_amount=110_000,
+            raw_data={},
+        )
+        preview = empty_preview(import_service._source_signature(self.csv_path, self.zip_path))
+        preview.csv_rows = [row]
+        preview.duplicate_summary = DuplicateSummary(new_ids={"NEW"})
+        with (
+            patch.object(import_service, "create_import_batch", return_value=7),
+            patch.object(import_service, "save_import_errors"),
+            patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
+            patch.object(import_service, "insert_invoice", side_effect=RuntimeError("登録失敗")),
+            patch.object(import_service, "finalize_import_batch") as finalize,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "登録失敗"):
+                import_service.execute_import(
+                    self.csv_path,
+                    self.zip_path,
+                    "",
+                    prepared_preview=preview,
+                )
+
+        finalize.assert_called_once_with(7, 0, 0, 0, "failed", "登録失敗")
 
 
 if __name__ == "__main__":

@@ -38,13 +38,14 @@ class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("請求書管理")
-        root.geometry("420x440")
+        root.geometry("420x490")
 
         frame = tk.Frame(root, padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
 
         buttons = [
             ("CSV + zip取込", self.open_import),
+            ("取込履歴", self.open_import_history),
             ("工事表示設定", self.open_project_visibility),
             ("工種コードマスタ", self.open_work_type_master),
             ("取引先別工種候補", self.open_vendor_work_type_candidates),
@@ -58,6 +59,11 @@ class MainWindow:
         from invoice_manager.ui.import_window import ImportWindow
 
         ImportWindow(self.root)
+
+    def open_import_history(self) -> None:
+        from invoice_manager.ui.import_history_window import ImportHistoryWindow
+
+        ImportHistoryWindow(self.root)
 
     def open_project_visibility(self) -> None:
         from invoice_manager.ui.project_visibility_window import ProjectVisibilityWindow

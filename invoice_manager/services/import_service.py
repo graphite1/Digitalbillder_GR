@@ -7,6 +7,7 @@ from invoice_manager.models import ImportResult, PreviewResult
 from invoice_manager.repositories import (
     add_audit_log,
     create_import_batch,
+    finalize_import_batch,
     insert_invoice,
     insert_invoice_file,
     list_hidden_project_codes,
@@ -114,48 +115,70 @@ def execute_import(
         zip_hash=sha256_file(zip_path),
         memo=memo,
     )
-    save_import_errors(import_batch_id, preview.errors)
-    add_audit_log("CSV取込", "import_batches", import_batch_id, f"{csv_path.name}: {preview.csv_count}件")
-    add_audit_log("zip取込", "import_batches", import_batch_id, f"{zip_path.name}: PDF {preview.pdf_file_count}件")
-    for external_id in sorted(preview.duplicate_summary.existing_skip_ids):
-        add_audit_log("重複スキップ", "import_batches", import_batch_id, external_id)
-    for external_id in sorted(preview.duplicate_summary.update_candidate_ids):
-        add_audit_log("更新候補検出", "import_batches", import_batch_id, external_id)
-
     inserted_count = 0
     file_count = 0
-    hidden_project_codes = list_hidden_project_codes()
-    importable_ids = {
-        row.external_id
-        for row in preview.csv_rows
-        if row.external_id in preview.duplicate_summary.new_ids
-        and row.project_code not in hidden_project_codes
-    }
-    with ZipFile(zip_path) as zip_file:
-        for row in preview.csv_rows:
-            if row.external_id not in importable_ids:
-                continue
-            row_billing_month = billing_month_from_invoice_date(row.invoice_date)
-            invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
-            inserted_count += 1
-            for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
-                stored_path, file_hash, file_size = store_pdf_from_zip(
-                    zip_path,
-                    item,
-                    row_billing_month,
-                    zip_file=zip_file,
-                )
-                inserted = insert_invoice_file(
-                    invoice_id=invoice_id,
-                    original_file_name=item.original_file_name,
-                    stored_file_path=stored_path,
-                    file_type=item.file_type,
-                    file_hash=file_hash,
-                    file_size=file_size,
-                )
-                if inserted:
-                    file_count += 1
-                    add_audit_log("PDF保存", "invoices", invoice_id, str(stored_path))
+    try:
+        save_import_errors(import_batch_id, preview.errors)
+        add_audit_log("CSV取込", "import_batches", import_batch_id, f"{csv_path.name}: {preview.csv_count}件")
+        add_audit_log("zip取込", "import_batches", import_batch_id, f"{zip_path.name}: PDF {preview.pdf_file_count}件")
+        for external_id in sorted(preview.duplicate_summary.existing_skip_ids):
+            add_audit_log("重複スキップ", "import_batches", import_batch_id, external_id)
+        for external_id in sorted(preview.duplicate_summary.update_candidate_ids):
+            add_audit_log("更新候補検出", "import_batches", import_batch_id, external_id)
+
+        hidden_project_codes = list_hidden_project_codes()
+        importable_ids = {
+            row.external_id
+            for row in preview.csv_rows
+            if row.external_id in preview.duplicate_summary.new_ids
+            and row.project_code not in hidden_project_codes
+        }
+        with ZipFile(zip_path) as zip_file:
+            for row in preview.csv_rows:
+                if row.external_id not in importable_ids:
+                    continue
+                row_billing_month = billing_month_from_invoice_date(row.invoice_date)
+                invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
+                inserted_count += 1
+                for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
+                    stored_path, file_hash, file_size = store_pdf_from_zip(
+                        zip_path,
+                        item,
+                        row_billing_month,
+                        zip_file=zip_file,
+                    )
+                    inserted = insert_invoice_file(
+                        invoice_id=invoice_id,
+                        original_file_name=item.original_file_name,
+                        stored_file_path=stored_path,
+                        file_type=item.file_type,
+                        file_hash=file_hash,
+                        file_size=file_size,
+                    )
+                    if inserted:
+                        file_count += 1
+                        add_audit_log("PDF保存", "invoices", invoice_id, str(stored_path))
+    except Exception as exc:
+        try:
+            finalize_import_batch(
+                import_batch_id,
+                inserted_count,
+                file_count,
+                len(preview.errors),
+                "failed",
+                str(exc),
+            )
+        except Exception:
+            pass
+        raise
+
+    finalize_import_batch(
+        import_batch_id,
+        inserted_count,
+        file_count,
+        len(preview.errors),
+        "completed",
+    )
 
     return ImportResult(
         preview=preview,
