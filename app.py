@@ -36,6 +36,7 @@ def print_preview(preview) -> None:
     print(f"既存スキップ件数: {preview.existing_skip_count}")
     print(f"更新候補件数: {preview.update_candidate_count}")
     print(f"重複候補件数: {preview.duplicate_candidate_count}")
+    print(f"アーカイブ工事スキップ件数: {preview.archived_skip_count}")
     print(f"エラー件数: {preview.error_count}")
     print(f"請求金額合計(税抜): {format_amount(preview.total_amount)}")
     print(f"PDFファイル総数: {preview.pdf_file_count}")

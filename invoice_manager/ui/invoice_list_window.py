@@ -319,7 +319,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.pdf_button.pack(side=tk.LEFT, padx=4)
         self.delete_button = tk.Button(frame, text="選択請求を削除", command=self.delete_selected_invoices, state=tk.DISABLED)
         self.delete_button.pack(side=tk.LEFT, padx=(12, 4))
-        tk.Button(frame, text="請求月一括再計算(テスト)", command=self.recalculate_billing_months).pack(side=tk.LEFT, padx=(12, 4))
+        tk.Button(frame, text="選択工事の請求月再計算(試験)", command=self.recalculate_billing_months).pack(side=tk.LEFT, padx=(12, 4))
         tk.Label(frame, textvariable=self.summary_var, anchor=tk.E).pack(side=tk.RIGHT, padx=4)
 
     def refresh(self) -> None:
@@ -556,17 +556,30 @@ class InvoiceListWindow(tk.Toplevel):
             messagebox.showerror("PDFを開けません", str(exc))
 
     def recalculate_billing_months(self) -> None:
+        selected_project = self.selected_project_var.get()
+        project_id = self.project_options.get(selected_project)
+        if project_id is None:
+            messagebox.showwarning("請求月再計算", "工事選択で対象工事を1件選んでください。")
+            return
         confirmed = messagebox.askyesno(
-            "請求月一括再計算",
-            "既存の全請求データを請求日から請求月へ再計算します。\nテスト用の実行として続けますか？",
+            "選択工事の請求月再計算",
+            f"{selected_project} の請求月を請求日から再計算します。\n"
+            "手動で補正した請求月は変更しません。試験機能として続けますか？",
         )
         if not confirmed:
             return
-        updated_count = recalculate_invoice_billing_months()
+        try:
+            updated_count = recalculate_invoice_billing_months(project_id)
+        except Exception as exc:
+            messagebox.showerror("請求月再計算エラー", str(exc))
+            return
         self.load_month_options()
         self.month_combo.configure(values=list(self.month_options.keys()))
         self.refresh()
-        messagebox.showinfo("請求月一括再計算", f"{updated_count}件の請求月を再計算しました。")
+        messagebox.showinfo(
+            "選択工事の請求月再計算",
+            f"{updated_count}件の請求月を再計算しました。\n手動補正分は変更していません。",
+        )
 
     def delete_selected_invoices(self) -> None:
         invoice_ids = self.selected_invoice_ids()
@@ -578,7 +591,11 @@ class InvoiceListWindow(tk.Toplevel):
         )
         if not confirmed:
             return
-        deleted_count, failed_paths = delete_invoices(invoice_ids)
+        try:
+            deleted_count, failed_paths = delete_invoices(invoice_ids)
+        except Exception as exc:
+            messagebox.showerror("請求削除エラー", str(exc))
+            return
         self.load_month_options()
         self.month_combo.configure(values=list(self.month_options.keys()))
         self.refresh()

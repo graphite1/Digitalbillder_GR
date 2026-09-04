@@ -9,6 +9,14 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "app.db"
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -62,6 +70,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     contact_id INTEGER,
     invoice_date TEXT NOT NULL,
     billing_month TEXT NOT NULL,
+    billing_month_manual_override INTEGER NOT NULL DEFAULT 0,
     total_amount INTEGER NOT NULL,
     total_amount_excluded INTEGER,
     local_memo TEXT,
@@ -177,7 +186,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -191,6 +200,7 @@ def initialize_database() -> None:
         _migrate_invoice_files_table(conn)
         _migrate_pdf_marks_table(conn)
         _migrate_projects_table(conn)
+        _migrate_invoice_billing_month_override(conn)
         _migrate_tax_excluded_amounts(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
 
@@ -214,6 +224,7 @@ def _migrate_invoices_table(conn: sqlite3.Connection) -> None:
             contact_id INTEGER,
             invoice_date TEXT NOT NULL,
             billing_month TEXT NOT NULL,
+            billing_month_manual_override INTEGER NOT NULL DEFAULT 0,
             total_amount INTEGER NOT NULL,
             local_memo TEXT,
             created_at TEXT NOT NULL,
@@ -227,15 +238,18 @@ def _migrate_invoices_table(conn: sqlite3.Connection) -> None:
         """
     )
     memo_source = "memo" if "memo" in columns else "NULL"
+    manual_override_source = "billing_month_manual_override" if "billing_month_manual_override" in columns else "0"
     conn.execute(
         f"""
         INSERT INTO invoices (
             id, import_batch_id, external_id, project_id, vendor_id, contact_id,
-            invoice_date, billing_month, total_amount, local_memo, created_at, updated_at
+            invoice_date, billing_month, billing_month_manual_override,
+            total_amount, local_memo, created_at, updated_at
         )
         SELECT
             id, import_batch_id, external_id, project_id, vendor_id, contact_id,
-            invoice_date, billing_month, total_amount, {memo_source}, created_at, updated_at
+            invoice_date, billing_month, {manual_override_source},
+            total_amount, {memo_source}, created_at, updated_at
         FROM invoices_old
         """
     )
@@ -301,6 +315,31 @@ def _migrate_projects_table(conn: sqlite3.Connection) -> None:
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()]
     if "is_visible" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN is_visible INTEGER NOT NULL DEFAULT 1")
+
+
+def _migrate_invoice_billing_month_override(conn: sqlite3.Connection) -> None:
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(invoices)").fetchall()]
+    if "billing_month_manual_override" in columns:
+        return
+
+    conn.execute(
+        "ALTER TABLE invoices ADD COLUMN billing_month_manual_override INTEGER NOT NULL DEFAULT 0"
+    )
+    from invoice_manager.utils.date_utils import billing_month_from_invoice_date
+
+    updates = []
+    for row in conn.execute("SELECT id, invoice_date, billing_month FROM invoices").fetchall():
+        try:
+            automatic_month = billing_month_from_invoice_date(row["invoice_date"])
+            is_manual = int((row["billing_month"] or "").strip() != automatic_month)
+        except Exception:
+            is_manual = 1
+        updates.append((is_manual, int(row["id"])))
+    if updates:
+        conn.executemany(
+            "UPDATE invoices SET billing_month_manual_override = ? WHERE id = ?",
+            updates,
+        )
 
 
 def _migrate_tax_excluded_amounts(conn: sqlite3.Connection) -> None:

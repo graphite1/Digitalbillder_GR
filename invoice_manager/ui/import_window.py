@@ -203,6 +203,7 @@ class ImportWindow(tk.Toplevel):
             ("既存スキップ件数", preview.existing_skip_count),
             ("更新候補件数", preview.update_candidate_count),
             ("重複候補件数", preview.duplicate_candidate_count),
+            ("アーカイブ工事スキップ件数", preview.archived_skip_count),
             ("エラー件数", preview.error_count),
             ("請求金額合計(税抜)", format_amount(preview.total_amount)),
             ("PDFファイル総数", preview.pdf_file_count),

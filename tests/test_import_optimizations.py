@@ -49,6 +49,8 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
         ):
             result = import_service.execute_import(
                 self.csv_path,
@@ -76,6 +78,8 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
         ):
             result = import_service.execute_import(
                 self.csv_path,
@@ -116,6 +120,8 @@ class ImportOptimizationTests(unittest.TestCase):
             patch.object(import_service, "create_import_batch", return_value=1),
             patch.object(import_service, "save_import_errors"),
             patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
             patch.object(import_service, "insert_invoice", return_value=10),
             patch.object(import_service, "insert_invoice_file", return_value=True),
             patch.object(
@@ -138,6 +144,39 @@ class ImportOptimizationTests(unittest.TestCase):
         self.assertEqual(result.file_count, 2)
         self.assertIs(zip_handles[0], zip_handles[1])
         self.assertIsNone(zip_handles[0].fp)
+
+    def test_preview_excludes_new_invoice_for_archived_project(self) -> None:
+        row = InvoiceCsvRow(
+            row_number=2,
+            external_id="ARCHIVED",
+            project_name="完了工事",
+            project_code="P999",
+            vendor_name="取引先A",
+            last_name="",
+            first_name="",
+            email="",
+            phone="",
+            invoice_date="2026-08-20",
+            total_amount=110_000,
+            raw_data={},
+        )
+        zip_index = ZipIndex(id_folders={"ARCHIVED"})
+        with (
+            patch.object(import_service, "read_invoice_csv", return_value=([row], [], "utf-8")),
+            patch.object(import_service, "read_zip_index", return_value=zip_index),
+            patch.object(
+                import_service,
+                "check_duplicates",
+                return_value=DuplicateSummary(new_ids={"ARCHIVED"}),
+            ),
+            patch.object(import_service, "list_hidden_project_codes", return_value={"P999"}),
+        ):
+            preview = import_service.preview_import(self.csv_path, self.zip_path, "")
+
+        self.assertEqual(preview.new_count, 0)
+        self.assertEqual(preview.archived_skip_count, 1)
+        self.assertEqual(preview.total_amount, 0)
+        self.assertTrue(any("アーカイブ工事" in warning for warning in preview.warnings))
 
 
 if __name__ == "__main__":

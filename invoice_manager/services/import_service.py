@@ -9,9 +9,11 @@ from invoice_manager.repositories import (
     create_import_batch,
     insert_invoice,
     insert_invoice_file,
+    list_hidden_project_codes,
     save_import_errors,
 )
 from invoice_manager.services.csv_reader import read_invoice_csv
+from invoice_manager.services.db_backup import create_database_backup
 from invoice_manager.services.duplicate_checker import check_duplicates
 from invoice_manager.services.file_storage import store_pdf_from_zip
 from invoice_manager.services.zip_reader import read_zip_index
@@ -25,6 +27,13 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
     zip_index = read_zip_index(zip_path)
     duplicate_summary = check_duplicates(rows)
     detected_billing_months = _detect_billing_months(rows)
+    hidden_project_codes = list_hidden_project_codes()
+    archived_skip_ids = {
+        row.external_id
+        for row in rows
+        if row.project_code in hidden_project_codes and row.external_id in duplicate_summary.new_ids
+    }
+    duplicate_summary.new_ids.difference_update(archived_skip_ids)
 
     csv_ids = {row.external_id for row in rows}
     zip_ids = set(zip_index.id_folders)
@@ -36,6 +45,8 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
     vendor_totals: dict[str, int] = {}
     total_amount = 0
     for row in rows:
+        if row.external_id in archived_skip_ids:
+            continue
         amount_excluded = tax_excluded_amount(row.total_amount)
         total_amount += amount_excluded
         project_totals[row.project_name] = project_totals.get(row.project_name, 0) + amount_excluded
@@ -51,6 +62,8 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
         warnings.append(f"更新候補のため自動上書きしません: {external_id}")
     for external_id in sorted(duplicate_summary.duplicate_candidate_ids):
         warnings.append(f"重複候補のため自動登録しません: {external_id}")
+    for external_id in sorted(archived_skip_ids):
+        warnings.append(f"アーカイブ工事のため取込対象外です: {external_id}")
     if len(detected_billing_months) > 1:
         warnings.append("請求月が複数含まれています。請求日から行単位で自動判定して登録します。")
 
@@ -69,6 +82,7 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
         pdf_file_count=pdf_file_count,
         project_totals=project_totals,
         vendor_totals=vendor_totals,
+        archived_skip_count=len(archived_skip_ids),
         detected_billing_months=detected_billing_months,
         csv_rows=rows,
         zip_index=zip_index,
@@ -90,6 +104,7 @@ def execute_import(
         preview = prepared_preview
     else:
         preview = preview_import(csv_path, zip_path, billing_month)
+    create_database_backup("before_import")
     batch_billing_month = preview.detected_billing_months[0] if len(preview.detected_billing_months) == 1 else ""
     import_batch_id = create_import_batch(
         billing_month=batch_billing_month,
@@ -109,7 +124,13 @@ def execute_import(
 
     inserted_count = 0
     file_count = 0
-    importable_ids = preview.duplicate_summary.new_ids
+    hidden_project_codes = list_hidden_project_codes()
+    importable_ids = {
+        row.external_id
+        for row in preview.csv_rows
+        if row.external_id in preview.duplicate_summary.new_ids
+        and row.project_code not in hidden_project_codes
+    }
     with ZipFile(zip_path) as zip_file:
         for row in preview.csv_rows:
             if row.external_id not in importable_ids:

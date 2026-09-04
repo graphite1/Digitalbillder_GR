@@ -5,6 +5,7 @@ from pathlib import Path
 
 from invoice_manager.db import get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
+from invoice_manager.services.db_backup import create_database_backup
 from invoice_manager.utils.date_utils import billing_month_from_invoice_date, parse_invoice_date, validate_billing_month
 from invoice_manager.utils.money_utils import tax_excluded_amount, tax_included_amount
 from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES
@@ -12,6 +13,71 @@ from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_
 
 def now_text() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _require_project_visible(conn, project_id: int) -> None:
+    row = conn.execute(
+        "SELECT is_visible FROM projects WHERE id = ?",
+        (int(project_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError("工事が見つかりません。")
+    if not row["is_visible"]:
+        raise ValueError("アーカイブ中の工事は変更できません。表示に戻してから操作してください。")
+
+
+def _require_invoice_ids_visible(conn, invoice_ids: list[int]) -> None:
+    ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT invoices.id, projects.is_visible
+        FROM invoices
+        JOIN projects ON projects.id = invoices.project_id
+        WHERE invoices.id IN ({placeholders})
+        """,
+        ids,
+    ).fetchall()
+    if len(rows) != len(ids):
+        raise ValueError("対象の請求が見つかりません。")
+    if any(not row["is_visible"] for row in rows):
+        raise ValueError("アーカイブ中の工事は変更できません。表示に戻してから操作してください。")
+
+
+def _require_allocation_visible(conn, allocation_id: int) -> None:
+    row = conn.execute(
+        """
+        SELECT projects.is_visible
+        FROM invoice_allocations
+        JOIN invoices ON invoices.id = invoice_allocations.invoice_id
+        JOIN projects ON projects.id = invoices.project_id
+        WHERE invoice_allocations.id = ?
+        """,
+        (int(allocation_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError("対象の振分が見つかりません。")
+    if not row["is_visible"]:
+        raise ValueError("アーカイブ中の工事は変更できません。表示に戻してから操作してください。")
+
+
+def _require_pdf_mark_visible(conn, mark_id: int) -> None:
+    row = conn.execute(
+        """
+        SELECT projects.is_visible
+        FROM pdf_marks
+        JOIN invoices ON invoices.id = pdf_marks.invoice_id
+        JOIN projects ON projects.id = invoices.project_id
+        WHERE pdf_marks.id = ?
+        """,
+        (int(mark_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError("対象のPDFマークが見つかりません。")
+    if not row["is_visible"]:
+        raise ValueError("アーカイブ中の工事は変更できません。表示に戻してから操作してください。")
 
 
 def add_audit_log(action: str, target_table: str | None = None, target_id: int | None = None, detail: str = "") -> None:
@@ -88,15 +154,14 @@ def save_import_errors(import_batch_id: int, errors: list[ImportErrorItem]) -> N
         )
 
 
-def get_or_create_project(project_code: str, project_name: str) -> int:
+def get_or_create_project(project_code: str, project_name: str, require_visible: bool = False) -> int:
     timestamp = now_text()
     with get_connection() as conn:
         row = conn.execute("SELECT id, is_visible FROM projects WHERE project_code = ?", (project_code,)).fetchone()
         if row:
-            if not row["is_visible"]:
-                conn.execute(
-                    "UPDATE projects SET is_visible = 1, updated_at = ? WHERE id = ?",
-                    (timestamp, int(row["id"])),
+            if require_visible and not row["is_visible"]:
+                raise ValueError(
+                    f"アーカイブ中の工事は取込対象外です: {project_code} {project_name}"
                 )
             return int(row["id"])
         cur = conn.execute(
@@ -122,6 +187,35 @@ def list_projects(active_only: bool = False) -> list:
                 """
             ).fetchall()
         )
+
+
+def list_projects_for_visibility() -> list:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                """
+                SELECT
+                    projects.id,
+                    projects.project_code,
+                    projects.project_name,
+                    projects.is_visible AS is_active,
+                    COUNT(invoices.id) AS invoice_count,
+                    COALESCE(MAX(invoices.invoice_date), '') AS last_invoice_date
+                FROM projects
+                LEFT JOIN invoices ON invoices.project_id = projects.id
+                GROUP BY projects.id, projects.project_code, projects.project_name, projects.is_visible
+                ORDER BY projects.project_code ASC, projects.project_name ASC
+                """
+            ).fetchall()
+        )
+
+
+def list_hidden_project_codes() -> set[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT project_code FROM projects WHERE is_visible = 0"
+        ).fetchall()
+    return {str(row["project_code"]) for row in rows}
 
 
 def set_project_active(project_id: int, is_active: bool) -> None:
@@ -306,7 +400,7 @@ def list_invoice_duplicate_references() -> list:
 
 
 def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int) -> int:
-    project_id = get_or_create_project(row.project_code, row.project_name)
+    project_id = get_or_create_project(row.project_code, row.project_name, require_visible=True)
     vendor_id = get_or_create_vendor(row.vendor_name)
     contact_id = get_or_create_contact(row, vendor_id)
     timestamp = now_text()
@@ -316,9 +410,10 @@ def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int)
             INSERT INTO invoices
                 (
                     import_batch_id, external_id, project_id, vendor_id, contact_id,
-                    invoice_date, billing_month, total_amount, total_amount_excluded, created_at, updated_at
+                    invoice_date, billing_month, billing_month_manual_override,
+                    total_amount, total_amount_excluded, created_at, updated_at
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             """,
             (
                 import_batch_id,
@@ -346,6 +441,7 @@ def insert_invoice_file(
     file_size: int,
 ) -> bool:
     with get_connection() as conn:
+        _require_invoice_ids_visible(conn, [invoice_id])
         try:
             conn.execute(
                 """
@@ -489,6 +585,7 @@ def list_invoice_files(invoice_id: int) -> list:
 
 def update_invoice_memo(invoice_id: int, memo: str) -> None:
     with get_connection() as conn:
+        _require_invoice_ids_visible(conn, [invoice_id])
         conn.execute(
             "UPDATE invoices SET local_memo = ?, updated_at = ? WHERE id = ?",
             (memo, now_text(), invoice_id),
@@ -498,29 +595,48 @@ def update_invoice_memo(invoice_id: int, memo: str) -> None:
 
 def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> int:
     billing_month = validate_billing_month(billing_month)
-    ids = [int(invoice_id) for invoice_id in invoice_ids]
+    ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
-    params = [billing_month, now_text(), *ids]
     with get_connection() as conn:
-        cur = conn.execute(
-            f"""
-            UPDATE invoices
-            SET billing_month = ?, updated_at = ?
-            WHERE id IN ({placeholders})
-            """,
-            params,
+        _require_invoice_ids_visible(conn, ids)
+        rows = conn.execute(
+            f"SELECT id, invoice_date FROM invoices WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    create_database_backup("before_billing_month_change")
+    timestamp = now_text()
+    updates = [
+        (
+            billing_month,
+            int(billing_month != billing_month_from_invoice_date(row["invoice_date"])),
+            timestamp,
+            int(row["id"]),
         )
-    add_audit_log("請求月変更", "invoices", None, f"{billing_month}: {len(ids)}件")
-    return int(cur.rowcount)
+        for row in rows
+    ]
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            UPDATE invoices
+            SET billing_month = ?, billing_month_manual_override = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+    add_audit_log("請求月変更", "invoices", None, f"{billing_month}: {len(updates)}件")
+    return len(updates)
 
 
 def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
-    ids = [int(invoice_id) for invoice_id in invoice_ids]
+    ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
     if not ids:
         return 0, []
     placeholders = ",".join("?" for _ in ids)
+    with get_connection() as conn:
+        _require_invoice_ids_visible(conn, ids)
+    create_database_backup("before_invoice_delete")
     with get_connection() as conn:
         file_rows = conn.execute(
             f"""
@@ -540,25 +656,37 @@ def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
     return int(cur.rowcount), failed_paths
 
 
-def recalculate_invoice_billing_months() -> int:
+def recalculate_invoice_billing_months(project_id: int) -> int:
     with get_connection() as conn:
-        rows = conn.execute("SELECT id, invoice_date FROM invoices").fetchall()
+        _require_project_visible(conn, project_id)
+        rows = conn.execute(
+            """
+            SELECT id, invoice_date, billing_month
+            FROM invoices
+            WHERE project_id = ? AND billing_month_manual_override = 0
+            """,
+            (int(project_id),),
+        ).fetchall()
         updates = [
             (billing_month_from_invoice_date(row["invoice_date"]), now_text(), int(row["id"]))
             for row in rows
             if (row["invoice_date"] or "").strip()
+            and (row["billing_month"] or "").strip() != billing_month_from_invoice_date(row["invoice_date"])
         ]
-        if not updates:
-            return 0
+    if not updates:
+        return 0
+    create_database_backup("before_billing_month_recalculation")
+    with get_connection() as conn:
+        _require_project_visible(conn, project_id)
         conn.executemany(
             """
             UPDATE invoices
             SET billing_month = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND project_id = ? AND billing_month_manual_override = 0
             """,
-            updates,
+            [(*update, int(project_id)) for update in updates],
         )
-    add_audit_log("請求月一括再計算", "invoices", None, f"{len(updates)}件")
+    add_audit_log("請求月一括再計算", "projects", int(project_id), f"{len(updates)}件")
     return len(updates)
 
 
@@ -610,6 +738,7 @@ def list_work_type_codes(project_id: int | None = None, active_only: bool = Fals
 def ensure_work_type_codes_for_project(project_id: int) -> int:
     timestamp = now_text()
     with get_connection() as conn:
+        _require_project_visible(conn, project_id)
         existing = {
             row["code"]: row
             for row in conn.execute(
@@ -661,6 +790,7 @@ def save_work_type_code(
         raise ValueError("工種コードは指定の一覧から選択してください。")
     timestamp = now_text()
     with get_connection() as conn:
+        _require_project_visible(conn, project_id)
         if work_type_code_id:
             conn.execute(
                 """
@@ -779,7 +909,9 @@ def save_invoice_allocation(
     included_amount = tax_included_amount(normalized_amount)
     timestamp = now_text()
     with get_connection() as conn:
+        _require_invoice_ids_visible(conn, [invoice_id])
         if allocation_id:
+            _require_allocation_visible(conn, allocation_id)
             existing = conn.execute(
                 "SELECT amount, amount_excluded FROM invoice_allocations WHERE id = ?",
                 (int(allocation_id),),
@@ -835,6 +967,7 @@ def save_invoice_allocation(
 
 def delete_invoice_allocation(allocation_id: int) -> None:
     with get_connection() as conn:
+        _require_allocation_visible(conn, allocation_id)
         conn.execute("DELETE FROM pdf_marks WHERE allocation_id = ?", (allocation_id,))
         conn.execute("DELETE FROM invoice_allocations WHERE id = ?", (allocation_id,))
     add_audit_log("振分削除", "invoice_allocations", allocation_id, "")
@@ -921,6 +1054,7 @@ def create_pdf_mark(
         raise ValueError("PDFマーク位置がページ範囲外です。")
     timestamp = now_text()
     with get_connection() as conn:
+        _require_invoice_ids_visible(conn, [invoice_id])
         cur = conn.execute(
             """
             INSERT INTO pdf_marks
@@ -956,6 +1090,7 @@ def create_pdf_mark(
 
 def delete_pdf_mark(mark_id: int) -> None:
     with get_connection() as conn:
+        _require_pdf_mark_visible(conn, mark_id)
         conn.execute("DELETE FROM pdf_marks WHERE id = ?", (int(mark_id),))
     add_audit_log("PDFマーク削除", "pdf_marks", int(mark_id), "")
 
@@ -974,6 +1109,7 @@ def update_pdf_mark_position(
     if not (0 <= x_pt <= page_width_pt) or not (0 <= y_pt <= page_height_pt) or page_width_pt <= 0 or page_height_pt <= 0:
         raise ValueError("PDFマーク位置がページ範囲外です。")
     with get_connection() as conn:
+        _require_pdf_mark_visible(conn, mark_id)
         conn.execute(
             """
             UPDATE pdf_marks
