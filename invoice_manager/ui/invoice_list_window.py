@@ -20,7 +20,6 @@ from invoice_manager.repositories import (
     update_invoice_billing_month,
     update_invoice_memo,
 )
-from invoice_manager.ui.invoice_detail_window import InvoiceDetailWindow
 from invoice_manager.utils.date_utils import (
     format_billing_month,
     format_invoice_date,
@@ -171,6 +170,7 @@ class InvoiceListWindow(tk.Toplevel):
     def open_hub(self) -> None:
         if self.open_hub_callback is not None:
             self.open_hub_callback(self)
+            self.reload_filter_options()
 
     def close_window(self) -> None:
         if self.on_close is not None:
@@ -180,17 +180,17 @@ class InvoiceListWindow(tk.Toplevel):
 
     def load_project_options(self) -> None:
         self.project_options = {"すべて": None}
-        for row in list_projects():
+        for row in list_projects(active_only=True):
             label = f"{row['project_code']}｜{row['project_name']}"
             self.project_options[label] = int(row["id"])
 
     def load_vendor_options(self) -> None:
         self.vendor_options = {"すべて": None}
-        for row in list_vendors():
+        for row in list_vendors(active_projects_only=True):
             self.vendor_options[row["vendor_name"]] = int(row["id"])
 
     def load_month_options(self) -> None:
-        months = list_billing_months(include_blank=True)
+        months = list_billing_months(include_blank=True, active_projects_only=True)
         self.month_options = {"すべて": None}
         if "" in months:
             self.month_options["未設定"] = "__blank__"
@@ -199,8 +199,27 @@ class InvoiceListWindow(tk.Toplevel):
 
     def load_invoice_date_options(self) -> None:
         self.invoice_date_options = {"すべて": None}
-        for date_text in list_invoice_dates():
+        for date_text in list_invoice_dates(active_projects_only=True):
             self.invoice_date_options[format_invoice_date(date_text)] = date_text
+
+    def reload_filter_options(self) -> None:
+        self.load_project_options()
+        self.load_vendor_options()
+        self.load_month_options()
+        self.load_invoice_date_options()
+
+        option_widgets = [
+            (self.project_combo, self.selected_project_var, self.project_options),
+            (self.vendor_combo, self.selected_vendor_var, self.vendor_options),
+            (self.month_combo, self.selected_month_var, self.month_options),
+            (self.date_from_combo, self.selected_date_from_var, self.invoice_date_options),
+            (self.date_to_combo, self.selected_date_to_var, self.invoice_date_options),
+        ]
+        for combo, variable, options in option_widgets:
+            combo.configure(values=list(options.keys()))
+            if variable.get() not in options:
+                variable.set("すべて")
+        self.refresh()
 
     def _build_tree(self) -> None:
         columns = (
@@ -280,7 +299,7 @@ class InvoiceListWindow(tk.Toplevel):
         tk.Label(frame, textvariable=self.summary_var, anchor=tk.E).pack(side=tk.RIGHT, padx=4)
 
     def refresh(self) -> None:
-        filters = {}
+        filters = {"active_projects_only": "1"}
         selected = self.selected_project_var.get()
         project_id = self.project_options.get(selected)
         if project_id:
@@ -312,7 +331,10 @@ class InvoiceListWindow(tk.Toplevel):
         row_count = 0
         for row in list_invoices(filters):
             row_count += 1
-            display_amount = self.amount_for_display(row["total_amount"] or 0)
+            display_amount = self.amount_for_display(
+                row["total_amount"] or 0,
+                row["total_amount_excluded"],
+            )
             total_amount += display_amount
             item_id = self.tree.insert(
                 "",
@@ -336,9 +358,11 @@ class InvoiceListWindow(tk.Toplevel):
         self.memo_var.set("")
         self._update_action_state()
 
-    def amount_for_display(self, amount) -> int:
+    def amount_for_display(self, amount, amount_excluded=None) -> int:
         if self.amount_display_var.get() == "税込":
             return int(amount)
+        if amount_excluded is not None:
+            return int(amount_excluded)
         return tax_excluded_amount(amount)
 
     def on_amount_display_selected(self, _event=None) -> None:
@@ -347,7 +371,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.tree.heading("total_amount", text=f"請求金額({mode})")
         self.refresh()
         for child in self.winfo_children():
-            if isinstance(child, InvoiceDetailWindow):
+            if callable(getattr(child, "set_amount_display_mode", None)):
                 child.set_amount_display_mode(mode)
 
     def on_filter_selected(self, _event=None) -> None:
@@ -403,6 +427,8 @@ class InvoiceListWindow(tk.Toplevel):
             self.open_detail()
 
     def open_detail(self) -> None:
+        from invoice_manager.ui.invoice_detail_window import InvoiceDetailWindow
+
         selection = self.tree.selection()
         if not selection:
             messagebox.showwarning("選択なし", "請求を選択してください。")

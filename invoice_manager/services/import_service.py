@@ -16,6 +16,7 @@ from invoice_manager.services.file_storage import store_pdf_from_zip
 from invoice_manager.services.zip_reader import read_zip_index
 from invoice_manager.utils.date_utils import billing_month_from_invoice_date
 from invoice_manager.utils.file_hash import sha256_file
+from invoice_manager.utils.money_utils import tax_excluded_amount
 
 
 def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> PreviewResult:
@@ -34,9 +35,10 @@ def preview_import(csv_path: Path, zip_path: Path, billing_month: str) -> Previe
     vendor_totals: dict[str, int] = {}
     total_amount = 0
     for row in rows:
-        total_amount += row.total_amount
-        project_totals[row.project_name] = project_totals.get(row.project_name, 0) + row.total_amount
-        vendor_totals[row.vendor_name] = vendor_totals.get(row.vendor_name, 0) + row.total_amount
+        amount_excluded = tax_excluded_amount(row.total_amount)
+        total_amount += amount_excluded
+        project_totals[row.project_name] = project_totals.get(row.project_name, 0) + amount_excluded
+        vendor_totals[row.vendor_name] = vendor_totals.get(row.vendor_name, 0) + amount_excluded
     pdf_file_count = sum(len(items) for items in zip_index.pdf_by_id.values())
 
     warnings = list(zip_index.warnings)

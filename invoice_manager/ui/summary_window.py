@@ -27,7 +27,7 @@ class SummaryWindow(tk.Toplevel):
             tree = ttk.Treeview(frame, columns=("label", "count", "total"), show="headings")
             tree.heading("label", text="項目")
             tree.heading("count", text="件数")
-            tree.heading("total", text="請求金額合計")
+            tree.heading("total", text="請求金額合計(税抜)")
             tree.column("label", width=480)
             tree.column("count", width=80, anchor=tk.E)
             tree.column("total", width=140, anchor=tk.E)

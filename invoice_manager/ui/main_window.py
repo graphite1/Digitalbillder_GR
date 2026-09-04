@@ -6,11 +6,6 @@ from tkinter import messagebox, simpledialog, ttk
 from urllib.parse import urlparse
 
 from invoice_manager.repositories import get_app_setting, list_billing_months, set_app_setting
-from invoice_manager.services.export_excel import export_monthly_invoice_list
-from invoice_manager.ui.import_window import ImportWindow
-from invoice_manager.ui.invoice_list_window import InvoiceListWindow
-from invoice_manager.ui.vendor_work_type_candidate_window import VendorWorkTypeCandidateWindow
-from invoice_manager.ui.work_type_master_window import WorkTypeMasterWindow
 from invoice_manager.utils.date_utils import format_billing_month, validate_billing_month
 
 
@@ -18,6 +13,8 @@ DEFAULT_DIGITAL_BILLDER_URL = "https://digitalbillder.com/"
 
 
 def run_app() -> None:
+    from invoice_manager.ui.invoice_list_window import InvoiceListWindow
+
     try:
         from tkinterdnd2 import TkinterDnD
 
@@ -41,13 +38,14 @@ class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("請求書管理")
-        root.geometry("420x380")
+        root.geometry("420x440")
 
         frame = tk.Frame(root, padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
 
         buttons = [
             ("CSV + zip取込", self.open_import),
+            ("工事表示設定", self.open_project_visibility),
             ("工種コードマスタ", self.open_work_type_master),
             ("取引先別工種候補", self.open_vendor_work_type_candidates),
             ("Digital Billderを開く", self.open_digital_billder),
@@ -57,15 +55,28 @@ class MainWindow:
             tk.Button(frame, text=label, command=command, height=2).pack(fill=tk.X, pady=4)
 
     def open_import(self) -> None:
+        from invoice_manager.ui.import_window import ImportWindow
+
         ImportWindow(self.root)
 
+    def open_project_visibility(self) -> None:
+        from invoice_manager.ui.project_visibility_window import ProjectVisibilityWindow
+
+        ProjectVisibilityWindow(self.root)
+
     def open_work_type_master(self) -> None:
+        from invoice_manager.ui.work_type_master_window import WorkTypeMasterWindow
+
         WorkTypeMasterWindow(self.root)
 
     def open_vendor_work_type_candidates(self) -> None:
+        from invoice_manager.ui.vendor_work_type_candidate_window import VendorWorkTypeCandidateWindow
+
         VendorWorkTypeCandidateWindow(self.root)
 
     def export_excel(self) -> None:
+        from invoice_manager.services.export_excel import export_monthly_invoice_list
+
         month = self.ask_billing_month()
         if not month:
             return

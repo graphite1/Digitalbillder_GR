@@ -198,16 +198,16 @@ class ImportWindow(tk.Toplevel):
             ("更新候補件数", preview.update_candidate_count),
             ("重複候補件数", preview.duplicate_candidate_count),
             ("エラー件数", preview.error_count),
-            ("請求金額合計", format_amount(preview.total_amount)),
+            ("請求金額合計(税抜)", format_amount(preview.total_amount)),
             ("PDFファイル総数", preview.pdf_file_count),
             ("請求月(自動判定)", "、".join(format_billing_month(month) for month in preview.detected_billing_months) or "なし"),
         ]
         for name, value in rows:
             self.tree.insert("", tk.END, values=(name, value))
         for name, value in preview.project_totals.items():
-            self.tree.insert("", tk.END, values=(f"工事別合計: {name}", format_amount(value)))
+            self.tree.insert("", tk.END, values=(f"工事別合計(税抜): {name}", format_amount(value)))
         for name, value in preview.vendor_totals.items():
-            self.tree.insert("", tk.END, values=(f"取引先別合計: {name}", format_amount(value)))
+            self.tree.insert("", tk.END, values=(f"取引先別合計(税抜): {name}", format_amount(value)))
 
         self.message.delete("1.0", tk.END)
         for warning in preview.warnings:

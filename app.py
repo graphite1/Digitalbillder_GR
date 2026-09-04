@@ -4,9 +4,6 @@ import argparse
 from pathlib import Path
 
 from invoice_manager.db import DB_PATH, initialize_database
-from invoice_manager.services.export_excel import export_monthly_invoice_list
-from invoice_manager.services.import_service import execute_import, preview_import
-from invoice_manager.ui.main_window import run_app
 from invoice_manager.utils.money_utils import format_amount
 
 
@@ -40,12 +37,12 @@ def print_preview(preview) -> None:
     print(f"更新候補件数: {preview.update_candidate_count}")
     print(f"重複候補件数: {preview.duplicate_candidate_count}")
     print(f"エラー件数: {preview.error_count}")
-    print(f"請求金額合計: {format_amount(preview.total_amount)}")
+    print(f"請求金額合計(税抜): {format_amount(preview.total_amount)}")
     print(f"PDFファイル総数: {preview.pdf_file_count}")
-    print("工事別合計:")
+    print("工事別合計(税抜):")
     for name, amount in preview.project_totals.items():
         print(f"  {name}: {format_amount(amount)}")
-    print("取引先別合計:")
+    print("取引先別合計(税抜):")
     for name, amount in preview.vendor_totals.items():
         print(f"  {name}: {format_amount(amount)}")
     if preview.warnings:
@@ -69,6 +66,8 @@ def main() -> None:
         return
 
     if args.preview:
+        from invoice_manager.services.import_service import preview_import
+
         csv_path = Path(_require(args.csv_path, "--csv"))
         zip_path = Path(_require(args.zip_path, "--zip"))
         month = args.month
@@ -77,6 +76,8 @@ def main() -> None:
         return
 
     if args.do_import:
+        from invoice_manager.services.import_service import execute_import
+
         csv_path = Path(_require(args.csv_path, "--csv"))
         zip_path = Path(_require(args.zip_path, "--zip"))
         month = args.month
@@ -89,6 +90,8 @@ def main() -> None:
         return
 
     if args.export:
+        from invoice_manager.services.export_excel import export_monthly_invoice_list
+
         month = _require(args.month, "--month")
         initialize_database()
         output_path = export_monthly_invoice_list(month)
@@ -96,6 +99,8 @@ def main() -> None:
         return
 
     initialize_database()
+    from invoice_manager.ui.main_window import run_app
+
     run_app()
 
 

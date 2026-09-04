@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_code TEXT NOT NULL,
     project_name TEXT NOT NULL,
+    is_visible INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(project_code)
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     invoice_date TEXT NOT NULL,
     billing_month TEXT NOT NULL,
     total_amount INTEGER NOT NULL,
+    total_amount_excluded INTEGER,
     local_memo TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -103,6 +105,7 @@ CREATE TABLE IF NOT EXISTS invoice_allocations (
     invoice_id INTEGER NOT NULL,
     work_type_code_id INTEGER NOT NULL,
     amount INTEGER NOT NULL,
+    amount_excluded INTEGER,
     memo TEXT,
     sort_order INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -187,6 +190,8 @@ def initialize_database() -> None:
         _migrate_invoices_table(conn)
         _migrate_invoice_files_table(conn)
         _migrate_pdf_marks_table(conn)
+        _migrate_projects_table(conn)
+        _migrate_tax_excluded_amounts(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
 
 
@@ -290,3 +295,39 @@ def _migrate_pdf_marks_table(conn: sqlite3.Connection) -> None:
         add_columns.append("ALTER TABLE pdf_marks ADD COLUMN page_height_pt REAL")
     for sql in add_columns:
         conn.execute(sql)
+
+
+def _migrate_projects_table(conn: sqlite3.Connection) -> None:
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()]
+    if "is_visible" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN is_visible INTEGER NOT NULL DEFAULT 1")
+
+
+def _migrate_tax_excluded_amounts(conn: sqlite3.Connection) -> None:
+    invoice_columns = [row["name"] for row in conn.execute("PRAGMA table_info(invoices)").fetchall()]
+    if "total_amount_excluded" not in invoice_columns:
+        conn.execute("ALTER TABLE invoices ADD COLUMN total_amount_excluded INTEGER")
+    conn.execute(
+        """
+        UPDATE invoices
+        SET total_amount_excluded = CASE
+            WHEN total_amount < 0 THEN -((ABS(total_amount) * 10) / 11)
+            ELSE (total_amount * 10) / 11
+        END
+        WHERE total_amount_excluded IS NULL
+        """
+    )
+
+    allocation_columns = [row["name"] for row in conn.execute("PRAGMA table_info(invoice_allocations)").fetchall()]
+    if "amount_excluded" not in allocation_columns:
+        conn.execute("ALTER TABLE invoice_allocations ADD COLUMN amount_excluded INTEGER")
+    conn.execute(
+        """
+        UPDATE invoice_allocations
+        SET amount_excluded = CASE
+            WHEN amount < 0 THEN -((ABS(amount) * 10) / 11)
+            ELSE (amount * 10) / 11
+        END
+        WHERE amount_excluded IS NULL
+        """
+    )

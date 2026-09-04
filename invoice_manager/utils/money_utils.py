@@ -18,3 +18,9 @@ def tax_excluded_amount(value) -> int:
     amount = int(value)
     sign = -1 if amount < 0 else 1
     return sign * (abs(amount) * 10 // 11)
+
+
+def tax_included_amount(value) -> int:
+    amount = int(value)
+    sign = -1 if amount < 0 else 1
+    return amount + sign * (abs(amount) // 10)

@@ -59,8 +59,11 @@ def export_work_type_summary(output_path: Path | None = None) -> Path:
         rows = list_work_type_summary(kind)
         _write_table(
             ws,
-            ["区分", "工種コード", "工種名", "請求件数", "振分金額"],
-            [[row["label"], row["work_type_code"], row["work_type_name"], row["count"], row["total"]] for row in rows],
+            ["区分", "工種コード", "工種名", "請求件数", "振分金額(税込)"],
+            [
+                [row["label"], row["work_type_code"], row["work_type_name"], row["count"], row["total_included"]]
+                for row in rows
+            ],
         )
     path = output_path.resolve()
     wb.save(path)
@@ -86,7 +89,7 @@ def export_invoice_allocations(output_path: Path | None = None) -> Path:
             "請求金額(税込)",
             "工種コード",
             "工種名",
-            "振分金額",
+            "振分金額(税込)",
             "振分メモ",
         ],
         [

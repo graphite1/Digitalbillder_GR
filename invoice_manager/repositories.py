@@ -6,6 +6,7 @@ from pathlib import Path
 from invoice_manager.db import get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.utils.date_utils import billing_month_from_invoice_date, parse_invoice_date, validate_billing_month
+from invoice_manager.utils.money_utils import tax_excluded_amount, tax_included_amount
 from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES
 
 
@@ -90,8 +91,13 @@ def save_import_errors(import_batch_id: int, errors: list[ImportErrorItem]) -> N
 def get_or_create_project(project_code: str, project_name: str) -> int:
     timestamp = now_text()
     with get_connection() as conn:
-        row = conn.execute("SELECT id FROM projects WHERE project_code = ?", (project_code,)).fetchone()
+        row = conn.execute("SELECT id, is_visible FROM projects WHERE project_code = ?", (project_code,)).fetchone()
         if row:
+            if not row["is_visible"]:
+                conn.execute(
+                    "UPDATE projects SET is_visible = 1, updated_at = ? WHERE id = ?",
+                    (timestamp, int(row["id"])),
+                )
             return int(row["id"])
         cur = conn.execute(
             """
@@ -103,39 +109,62 @@ def get_or_create_project(project_code: str, project_name: str) -> int:
         return int(cur.lastrowid)
 
 
-def list_projects() -> list:
+def list_projects(active_only: bool = False) -> list:
+    where = "WHERE is_visible = 1" if active_only else ""
     with get_connection() as conn:
         return list(
             conn.execute(
-                """
-                SELECT id, project_code, project_name
+                f"""
+                SELECT id, project_code, project_name, is_visible AS is_active
                 FROM projects
+                {where}
                 ORDER BY project_code ASC, project_name ASC
                 """
             ).fetchall()
         )
 
 
-def list_billing_months(include_blank: bool = False) -> list[str]:
-    blank_condition = "" if include_blank else "WHERE COALESCE(billing_month, '') <> ''"
+def set_project_active(project_id: int, is_active: bool) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE projects SET is_visible = ?, updated_at = ? WHERE id = ?",
+            (1 if is_active else 0, now_text(), int(project_id)),
+        )
+    action = "工事を表示" if is_active else "工事を非表示"
+    add_audit_log(action, "projects", int(project_id), "")
+
+
+def list_billing_months(include_blank: bool = False, active_projects_only: bool = False) -> list[str]:
+    where = []
+    if not include_blank:
+        where.append("COALESCE(invoices.billing_month, '') <> ''")
+    if active_projects_only:
+        where.append("projects.is_visible = 1")
+    join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
+    where_sql = " WHERE " + " AND ".join(where) if where else ""
     with get_connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT DISTINCT billing_month FROM invoices
-            {blank_condition}
-            ORDER BY billing_month DESC
+            SELECT DISTINCT invoices.billing_month FROM invoices
+            {join}
+            {where_sql}
+            ORDER BY invoices.billing_month DESC
             """
         ).fetchall()
     return [row["billing_month"] for row in rows]
 
 
-def list_invoice_dates() -> list[str]:
+def list_invoice_dates(active_projects_only: bool = False) -> list[str]:
+    join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
+    where = "WHERE projects.is_visible = 1" if active_projects_only else ""
     with get_connection() as conn:
         rows = conn.execute(
-            """
-            SELECT DISTINCT invoice_date
+            f"""
+            SELECT DISTINCT invoices.invoice_date
             FROM invoices
-            ORDER BY invoice_date ASC
+            {join}
+            {where}
+            ORDER BY invoices.invoice_date ASC
             """
         ).fetchall()
     return [row["invoice_date"] for row in rows]
@@ -157,14 +186,21 @@ def get_or_create_vendor(vendor_name: str) -> int:
         return int(cur.lastrowid)
 
 
-def list_vendors() -> list:
+def list_vendors(active_projects_only: bool = False) -> list:
+    join = ""
+    where = ""
+    if active_projects_only:
+        join = "JOIN invoices ON invoices.vendor_id = vendors.id JOIN projects ON projects.id = invoices.project_id"
+        where = "WHERE projects.is_visible = 1"
     with get_connection() as conn:
         return list(
             conn.execute(
-                """
-                SELECT id, vendor_name
+                f"""
+                SELECT DISTINCT vendors.id, vendors.vendor_name
                 FROM vendors
-                ORDER BY vendor_name ASC
+                {join}
+                {where}
+                ORDER BY vendors.vendor_name ASC
                 """
             ).fetchall()
         )
@@ -261,9 +297,9 @@ def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int)
             INSERT INTO invoices
                 (
                     import_batch_id, external_id, project_id, vendor_id, contact_id,
-                    invoice_date, billing_month, total_amount, created_at, updated_at
+                    invoice_date, billing_month, total_amount, total_amount_excluded, created_at, updated_at
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 import_batch_id,
@@ -274,6 +310,7 @@ def insert_invoice(row: InvoiceCsvRow, billing_month: str, import_batch_id: int)
                 row.invoice_date,
                 billing_month,
                 row.total_amount,
+                tax_excluded_amount(row.total_amount),
                 timestamp,
                 timestamp,
             ),
@@ -319,6 +356,8 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
     filters = filters or {}
     where = []
     params: list[str | int] = []
+    if _filter_text(filters.get("active_projects_only")):
+        where.append("projects.is_visible = 1")
     like_mapping = {
         "project_name": "projects.project_name",
         "vendor_name": "vendors.vendor_name",
@@ -358,11 +397,11 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
         params.append(parse_invoice_date(invoice_date_to))
     amount_min = _filter_text(filters.get("amount_min"))
     if amount_min:
-        where.append("invoices.total_amount >= ?")
+        where.append("invoices.total_amount_excluded >= ?")
         params.append(int(amount_min.replace(",", "")))
     amount_max = _filter_text(filters.get("amount_max"))
     if amount_max:
-        where.append("invoices.total_amount <= ?")
+        where.append("invoices.total_amount_excluded <= ?")
         params.append(int(amount_max.replace(",", "")))
 
     sql = """
@@ -378,6 +417,7 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
             COALESCE(vendor_contacts.phone, '') AS phone,
             invoices.invoice_date,
             invoices.total_amount,
+            invoices.total_amount_excluded,
             COALESCE(invoices.local_memo, '') AS local_memo,
             COUNT(invoice_files.id) AS file_count
         FROM invoices
@@ -394,8 +434,8 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
         "billing_month_desc": "invoices.billing_month DESC, invoices.invoice_date DESC, invoices.id DESC",
         "project_code_asc": "projects.project_code ASC, invoices.invoice_date DESC, invoices.id DESC",
         "vendor_name_asc": "vendors.vendor_name ASC, invoices.invoice_date DESC, invoices.id DESC",
-        "amount_desc": "invoices.total_amount DESC, invoices.invoice_date DESC, invoices.id DESC",
-        "amount_asc": "invoices.total_amount ASC, invoices.invoice_date DESC, invoices.id DESC",
+        "amount_desc": "invoices.total_amount_excluded DESC, invoices.invoice_date DESC, invoices.id DESC",
+        "amount_asc": "invoices.total_amount_excluded ASC, invoices.invoice_date DESC, invoices.id DESC",
     }
     sort_key = _filter_text(filters.get("sort"))
     order_by = order_mapping.get(sort_key, order_mapping["invoice_date_desc"])
@@ -531,7 +571,7 @@ def list_work_type_codes(project_id: int | None = None, active_only: bool = Fals
         where.append("project_id = ?")
         params.append(int(project_id))
     if active_only:
-        where.append("is_active = 1")
+        where.append("work_type_codes.is_active = 1")
     catalog_codes = [code for code, _name in WORK_TYPE_CODE_CATALOG]
     placeholders = ",".join("?" for _code in catalog_codes)
     where.append(f"work_type_codes.code IN ({placeholders})")
@@ -705,16 +745,31 @@ def save_invoice_allocation(
     allocation_id: int | None = None,
 ) -> int:
     normalized_amount = 0 if amount is None else int(amount)
+    included_amount = tax_included_amount(normalized_amount)
     timestamp = now_text()
     with get_connection() as conn:
         if allocation_id:
+            existing = conn.execute(
+                "SELECT amount, amount_excluded FROM invoice_allocations WHERE id = ?",
+                (int(allocation_id),),
+            ).fetchone()
+            if existing and int(existing["amount_excluded"]) == normalized_amount:
+                included_amount = int(existing["amount"])
             conn.execute(
                 """
                 UPDATE invoice_allocations
-                SET work_type_code_id = ?, amount = ?, memo = ?, sort_order = ?, updated_at = ?
+                SET work_type_code_id = ?, amount = ?, amount_excluded = ?, memo = ?, sort_order = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (work_type_code_id, normalized_amount, memo, sort_order, timestamp, allocation_id),
+                (
+                    work_type_code_id,
+                    included_amount,
+                    normalized_amount,
+                    memo,
+                    sort_order,
+                    timestamp,
+                    allocation_id,
+                ),
             )
             saved_id = int(allocation_id)
             action = "振分更新"
@@ -722,14 +777,28 @@ def save_invoice_allocation(
             cur = conn.execute(
                 """
                 INSERT INTO invoice_allocations
-                    (invoice_id, work_type_code_id, amount, memo, sort_order, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (invoice_id, work_type_code_id, amount, amount_excluded, memo, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (invoice_id, work_type_code_id, normalized_amount, memo, sort_order, timestamp, timestamp),
+                (
+                    invoice_id,
+                    work_type_code_id,
+                    included_amount,
+                    normalized_amount,
+                    memo,
+                    sort_order,
+                    timestamp,
+                    timestamp,
+                ),
             )
             saved_id = int(cur.lastrowid)
             action = "振分登録"
-    add_audit_log(action, "invoice_allocations", saved_id, str(normalized_amount))
+    add_audit_log(
+        action,
+        "invoice_allocations",
+        saved_id,
+        f"税抜:{normalized_amount} 税込:{included_amount}",
+    )
     return saved_id
 
 
@@ -743,7 +812,7 @@ def delete_invoice_allocation(allocation_id: int) -> None:
 def get_invoice_allocation_total(invoice_id: int) -> int:
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount), 0) AS total FROM invoice_allocations WHERE invoice_id = ?",
+            "SELECT COALESCE(SUM(amount_excluded), 0) AS total FROM invoice_allocations WHERE invoice_id = ?",
             (invoice_id,),
         ).fetchone()
     return int(row["total"])
@@ -910,7 +979,8 @@ def list_work_type_summary(kind: str) -> list:
                     work_type_codes.code AS work_type_code,
                     work_type_codes.name AS work_type_name,
                     COUNT(DISTINCT invoices.id) AS count,
-                    SUM(invoice_allocations.amount) AS total
+                    SUM(invoice_allocations.amount_excluded) AS total,
+                    SUM(invoice_allocations.amount) AS total_included
                 FROM invoice_allocations
                 JOIN invoices ON invoices.id = invoice_allocations.invoice_id
                 JOIN projects ON projects.id = invoices.project_id
@@ -980,7 +1050,7 @@ def get_summary() -> dict[str, list]:
             "月別合計": list(
                 conn.execute(
                     """
-                    SELECT billing_month AS label, COUNT(*) AS count, SUM(total_amount) AS total
+                    SELECT billing_month AS label, COUNT(*) AS count, SUM(total_amount_excluded) AS total
                     FROM invoices
                     GROUP BY billing_month
                     ORDER BY billing_month DESC
@@ -990,7 +1060,7 @@ def get_summary() -> dict[str, list]:
             "工事別合計": list(
                 conn.execute(
                     """
-                    SELECT projects.project_name AS label, COUNT(*) AS count, SUM(invoices.total_amount) AS total
+                    SELECT projects.project_name AS label, COUNT(*) AS count, SUM(invoices.total_amount_excluded) AS total
                     FROM invoices
                     JOIN projects ON projects.id = invoices.project_id
                     GROUP BY projects.id
@@ -1001,7 +1071,7 @@ def get_summary() -> dict[str, list]:
             "取引先別合計": list(
                 conn.execute(
                     """
-                    SELECT vendors.vendor_name AS label, COUNT(*) AS count, SUM(invoices.total_amount) AS total
+                    SELECT vendors.vendor_name AS label, COUNT(*) AS count, SUM(invoices.total_amount_excluded) AS total
                     FROM invoices
                     JOIN vendors ON vendors.id = invoices.vendor_id
                     GROUP BY vendors.id
@@ -1015,7 +1085,7 @@ def get_summary() -> dict[str, list]:
                     SELECT
                         projects.project_name || ' / ' || vendors.vendor_name AS label,
                         COUNT(*) AS count,
-                        SUM(invoices.total_amount) AS total
+                        SUM(invoices.total_amount_excluded) AS total
                     FROM invoices
                     JOIN projects ON projects.id = invoices.project_id
                     JOIN vendors ON vendors.id = invoices.vendor_id
