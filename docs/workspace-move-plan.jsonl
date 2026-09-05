@@ -1,0 +1,5 @@
+{"source_relative":"Digitalbuilder_GR-readonly-probe","destination_relative":"Digitalbuilder＿GR/作業補助/読取り試験","unit_id":"readonly-probe","category":"読取り試験","reason":"開発本体内へ読取り試験一式を集約","move_method":"directory"}
+{"source_relative":"Digitalbuilder_GR-release-check","destination_relative":"Digitalbuilder＿GR/作業補助/配布検証","unit_id":"release-check","category":"配布検証","reason":"隔離台帳を含む検証環境を分割せず集約","move_method":"directory"}
+{"source_relative":"Digitalbuilder_GR-release-files","destination_relative":"Digitalbuilder＿GR/作業補助/配布ファイル","unit_id":"release-files","category":"配布ファイル","reason":"署名済み配布物を変更せず集約","move_method":"directory"}
+{"source_relative":"Digitalbuilder_GR-ui-preview","destination_relative":"Digitalbuilder＿GR/作業補助/画面試作","unit_id":"ui-preview","category":"画面試作","reason":"未コミット変更を保持したままGit worktreeを集約","move_method":"git-worktree-move"}
+{"source_relative":"Digitalbuilder_GR-updates-site","destination_relative":"Digitalbuilder＿GR/作業補助/配布サイト","unit_id":"updates-site","category":"配布サイト","reason":"独立したGitとSites設定を保持して集約","move_method":"directory"}

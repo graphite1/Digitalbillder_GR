@@ -36,7 +36,7 @@ PART_SIZE = 8 * 1024 * 1024
 MAX_DISTRIBUTION_SIZE = 2 * 1024 * 1024 * 1024
 DEFAULT_PYTHON_ROOT = Path.home() / "AppData/Local/Python/pythoncore-3.14-64"
 DEFAULT_PLAYWRIGHT_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "ms-playwright"
-DEFAULT_OUTPUT_DIR = ROOT.parent / "Digitalbuilder_GR-release-files/Windows bundles"
+DEFAULT_OUTPUT_DIR = ROOT / "作業補助" / "配布ファイル" / "Windows bundles"
 _RUNTIME_DIRECTORIES = ("DLLs", "Lib", "tcl")
 _RUNTIME_FILES = (
     "LICENSE.txt",

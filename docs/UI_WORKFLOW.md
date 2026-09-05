@@ -3,7 +3,7 @@
 通常版は `main`、管理画面の検討版は `codex/management-ui` の別worktreeです。
 
 - 通常版: `C:/Users/rinnt/Documents/Codex/Digitalbuilder＿GR`
-- UI検討版: `C:/Users/rinnt/Documents/Codex/Digitalbuilder_GR-ui-preview`
+- UI検討版: `C:/Users/rinnt/Documents/Codex/Digitalbuilder＿GR/作業補助/画面試作`
 
 UIを変更する対象は `invoice_manager/ui/main_window.py` の管理メニューだけです。請求一覧・詳細・予算・履歴画面の配置、全体テーマは変更しません。操作数と一覧性を優先し、全操作が一画面で見える構成を比較します。
 

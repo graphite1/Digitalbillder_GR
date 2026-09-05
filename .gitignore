@@ -16,3 +16,6 @@ dist/
 .updates/
 tools/windows/.compile/
 共有用/*.png
+
+# Local probes, test installations, release bundles and the separate site repository.
+/作業補助/

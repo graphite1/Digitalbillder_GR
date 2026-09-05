@@ -53,7 +53,7 @@ ZIPを直接取得した場合は、ZIP内から直接実行せず、すべて�
 3. 対象ソース・変更履歴・検証結果を確認して通常アプリへコミット・プッシュし、その確定したソースから仮想環境で配布ファイルを作ります。例の番号は次回そのまま使わず、履歴と照合してください。
 
 ```powershell
-.\.venv\Scripts\python.exe tools\build_release.py --version 1.0.4 --sequence 4 --output-dir C:\Users\rinnt\Documents\Codex\Digitalbuilder_GR-release-files --notes "今回の具体的な変更内容"
+.\.venv\Scripts\python.exe tools\build_release.py --version 1.0.4 --sequence 4 --output-dir 'C:\Users\rinnt\Documents\Codex\Digitalbuilder＿GR\作業補助\配布ファイル' --notes "今回の具体的な変更内容"
 ```
 
 4. ZIP、署名付きmanifest JSON、公開鍵JSONが出ます。秘密鍵はWindows資格情報ストアに保存され、ファイルへ出ません。台帳・実PDF・.git・設定・秘密鍵がZIPに入っていないことを検査します。
