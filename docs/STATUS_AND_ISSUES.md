@@ -4,7 +4,7 @@
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
 
-ホスト機能有効化はWindowsコンポーネントストア破損（0x80073712）で失敗し、DISM標準修復を開始した。Sandboxでの初回導入とHyper-VゲストOS導入・更新復旧試験は未完了。修復結果はローカル `host/repair-status.json`、機能の状態は `host/feature-status.json` で確認する。再起動は自動実行しない。Windows 11 ISOは未指定。
+ホスト機能有効化はWindowsコンポーネントストア破損（0x80073712）で失敗。DISM標準修復も2026-09-06 08:29に「修復コンテンツが見つからない」（0x800f0915）で失敗した。現在のWindowsに適合する修復ソースが必要。Sandboxでの初回導入とHyper-VゲストOS導入・更新復旧試験は未完了。修復結果はローカル `host/repair-status.json`、機能の状態は `host/feature-status.json` で確認する。再起動は実行していない。Windows 11 ISOは未指定。
 
 確認日: 2026-09-05（日本時間）
 
