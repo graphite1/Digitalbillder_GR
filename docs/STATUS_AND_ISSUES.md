@@ -1,5 +1,11 @@
 # 現状と課題
 
+## Windows仮想テスト環境（2026-09-06）
+
+初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
+
+ホスト機能有効化はWindowsコンポーネントストア破損（0x80073712）で失敗し、DISM標準修復を開始した。Sandboxでの初回導入とHyper-VゲストOS導入・更新復旧試験は未完了。修復結果はローカル `host/repair-status.json`、機能の状態は `host/feature-status.json` で確認する。再起動は自動実行しない。Windows 11 ISOは未指定。
+
 確認日: 2026-09-05（日本時間）
 
 **新着取込、工種の手動振分、保管済み実績・履歴候補、PDF予算の一括登録、アプリ内更新を実装済みです。コード公開版はv1.0.4（sequence 4）です。** 初回導入用の97 KiBセットアップEXEを公開し、初回取得量を約207 MiBから約85 MiBへ削減しました。v1.0.1・v1.0.2は、旧launcherが`__pycache__`を生成して署名台帳検証に失敗する問題により配布停止しています。`app.py`冒頭の`sys.dont_write_bytecode=True`とlauncherの`-B` / `PYTHONDONTWRITEBYTECODE`で修正しました。Webへの「編集を保存」はまだ無効です。画面変更への耐性を高める通信データ読取りは、通常版から分離した3件の照合試験まで進んでいます。
