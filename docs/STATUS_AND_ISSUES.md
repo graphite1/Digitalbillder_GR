@@ -2,7 +2,7 @@
 
 確認日: 2026-09-05（日本時間）
 
-**新着取込、工種の手動振分、保管済み実績・履歴候補、PDF予算の一括登録、アプリ内更新を実装済みです。コード公開版はv1.0.3（sequence 3）です。** v1.0.1・v1.0.2は、旧launcherが`__pycache__`を生成して署名台帳検証に失敗する問題により配布停止しています。`app.py`冒頭の`sys.dont_write_bytecode=True`とlauncherの`-B` / `PYTHONDONTWRITEBYTECODE`で修正しました。Webへの「編集を保存」はまだ無効です。画面変更への耐性を高める通信データ読取りは、通常版から分離した3件の照合試験まで進んでいます。
+**新着取込、工種の手動振分、保管済み実績・履歴候補、PDF予算の一括登録、アプリ内更新を実装済みです。コード公開版はv1.0.4（sequence 4）です。** 初回導入用の97 KiBセットアップEXEを公開し、初回取得量を約207 MiBから約85 MiBへ削減しました。v1.0.1・v1.0.2は、旧launcherが`__pycache__`を生成して署名台帳検証に失敗する問題により配布停止しています。`app.py`冒頭の`sys.dont_write_bytecode=True`とlauncherの`-B` / `PYTHONDONTWRITEBYTECODE`で修正しました。Webへの「編集を保存」はまだ無効です。画面変更への耐性を高める通信データ読取りは、通常版から分離した3件の照合試験まで進んでいます。
 
 次の開発は、**既存の取得結果を保ったまま新しい読取り結果を比較する試験モード**が候補です。予算・実績を判断に使う前には、税抜額、誤請求の除外、工種対応の正確さも直す必要があります。今回の実機検証では必要範囲のCSV/ZIPを取得し、隔離台帳へ実請求1件・PDF添付2点を登録しました。通常の主台帳は変更していません。
 
@@ -30,7 +30,7 @@
 
 将来方針（未実装）: [MCP接続で追加請求をPDF内部情報・OCRから判断し、根拠付き振分案を利用者の最終確認へ引き継ぐ](MCP_INVOICE_ALLOCATION_PLAN.md)。今回の追記は方針の記録であり、下記の実装状況とは区別する。
 
-更新機構（実装・公開済み）: [アプリ更新の運用](UPDATE_GUIDE.md)。[配布サイト](https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site)でv1.0.3と変更履歴を公開。v1.0.1・v1.0.2は旧launcherの`__pycache__`生成による署名台帳検証失敗のため配布停止しています。サイトを開かず、アプリの「アプリの更新」から取得できます。初回は起動.batでアプリを起動し直してください。Windows portable r2（distribution sequence 2、code sequence 3、217,504,939 bytes、SHA-256 `2a70134e512689ccc5c6893ab5e48cb1285df05071178466431cc03dbb6c9bd1`）を作成し、ホストPythonに依存しない起動、資格情報保存・取得・再起動を実測しました。詳細は[DISTRIBUTION_VERIFICATION.md](DISTRIBUTION_VERIFICATION.md)を参照してください。今後の修正は新しい版番号・配布番号で署名し、公開済みファイルを差し替えず配布します。
+更新機構（実装・公開済み）: [アプリ更新の運用](UPDATE_GUIDE.md)。[配布サイト](https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site)でv1.0.4と変更履歴を公開。サイトを開かず、アプリの「アプリの更新」から取得できます。初めて使うPCには、必要な実行環境を取得するセットアップEXE・起動EXE・ショートカットを用意しました。セットアップ後は一時ZIPを削除し、必要なruntimeと台帳を残します。新しいWindows版（distribution sequence 3、code sequence 4）は既存Edgeを利用し、EdgeがないPCだけ専用ブラウザーを取得します。旧同梱版は引き続き同梱ブラウザーを使います。公開EXEからの導入、資格情報保存、実請求1件・PDF2点の取込と内部表示、再起動、旧版からの更新とバックアップをこのWin11 x64で確認しました。詳細・未検証範囲は[DISTRIBUTION_VERIFICATION.md](DISTRIBUTION_VERIFICATION.md)を参照してください。今後も新しい版番号・配布番号で署名し、公開済みファイルを差し替えず配布します。
 
 | 項目 | 確認結果 |
 | --- | --- |
