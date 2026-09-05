@@ -14,13 +14,24 @@ def format_amount(value) -> str:
     return f"{int(value):,}"
 
 
-def tax_excluded_amount(value) -> int:
-    amount = int(value)
-    sign = -1 if amount < 0 else 1
-    return sign * (abs(amount) * 10 // 11)
+TAX_RATE_LABELS = {"10": "10%", "8": "8%", "exempt": "非課税"}
 
 
-def tax_included_amount(value) -> int:
+def tax_rate_percent(tax_rate: str) -> int:
+    if tax_rate not in TAX_RATE_LABELS:
+        raise ValueError("税率は10%・8%・非課税から選択してください。")
+    return 0 if tax_rate == "exempt" else int(tax_rate)
+
+
+def tax_excluded_amount(value, tax_rate: str = "10") -> int:
     amount = int(value)
     sign = -1 if amount < 0 else 1
-    return amount + sign * (abs(amount) // 10)
+    rate = tax_rate_percent(tax_rate)
+    return sign * (abs(amount) * 100 // (100 + rate))
+
+
+def tax_included_amount(value, tax_rate: str = "10") -> int:
+    amount = int(value)
+    sign = -1 if amount < 0 else 1
+    rate = tax_rate_percent(tax_rate)
+    return amount + sign * (abs(amount) * rate // 100)

@@ -26,6 +26,7 @@ from invoice_manager.repositories import (
     list_vendor_work_type_candidates,
     list_work_type_codes,
     save_invoice_allocation,
+    save_work_type_code,
     update_pdf_mark_position,
     update_invoice_memo,
 )
@@ -33,7 +34,7 @@ from invoice_manager.services.export_marked_pdf import export_marked_pdf
 from invoice_manager.utils.file_size_utils import format_file_size
 from invoice_manager.utils.date_utils import format_billing_month
 from invoice_manager.utils.file_safety import validate_original_pdf_path
-from invoice_manager.utils.money_utils import format_amount, tax_excluded_amount
+from invoice_manager.utils.money_utils import TAX_RATE_LABELS, format_amount, tax_excluded_amount, tax_included_amount
 
 
 class InvoiceDetailWindow(tk.Toplevel):
@@ -57,6 +58,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.file_db_ids: dict[str, int] = {}
         self.allocation_ids: dict[str, int] = {}
         self.allocation_amounts: dict[str, int] = {}
+        self.allocation_rates: dict[str, str] = {}
+        self.allocation_gross: dict[str, int] = {}
         self.work_type_options: dict[str, int] = {}
         self.amount_display_mode = amount_display_mode
         self.pdf_path: str | None = None
@@ -166,7 +169,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         tk.Label(allocation_frame, textvariable=self.allocation_summary_var).pack(anchor=tk.W)
         self.allocations = ttk.Treeview(
             allocation_frame,
-            columns=("code", "name", "amount", "memo", "sort_order"),
+            columns=("code", "name", "amount", "memo", "sort_order", "tax_rate"),
+            displaycolumns=("code", "name", "amount", "tax_rate", "memo", "sort_order"),
             show="headings",
             height=5,
         )
@@ -176,6 +180,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             ("amount", "振分金額", 110),
             ("memo", "メモ", 160),
             ("sort_order", "並び順", 50),
+            ("tax_rate", "税率", 60),
         ]:
             self.allocations.heading(column, text=label)
             self.allocations.column(column, width=width)
@@ -187,6 +192,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         tk.Button(buttons, text="振分行を追加", command=self.add_allocation).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="振分行を編集", command=self.edit_allocation).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="振分行を削除", command=self.delete_allocation).pack(side=tk.LEFT, padx=4)
+        tk.Button(buttons, text="Web転記プレビュー", command=self.open_transfer_preview).pack(side=tk.LEFT, padx=4)
+        tk.Button(buttons, text="履歴候補", command=self.open_history_suggestions).pack(side=tk.LEFT, padx=4)
 
         files_frame = tk.LabelFrame(side_panel, text="添付ファイル", padx=8, pady=8)
         files_frame.grid(row=0, column=1, sticky=tk.NSEW)
@@ -246,6 +253,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             tax_excluded_amount(self.invoice_total) if excluded_value is None else int(excluded_value)
         )
         self.project_id = int(row["project_id"])
+        self.project_code = str(row["project_code"])
         self.vendor_id = int(row["vendor_id"])
         self.vendor_name_var.set(row["vendor_name"])
         self.info_vars["billing_month"].set(format_billing_month(row["billing_month"]))
@@ -272,6 +280,9 @@ class InvoiceDetailWindow(tk.Toplevel):
         if self.vendor_id:
             vendor_codes = [row["code"] for row in list_vendor_work_type_candidates(self.vendor_id)]
         priority_codes = recent_codes + [code for code in vendor_codes if code not in recent_codes]
+        for suggestion in self.get_history_suggestions():
+            if suggestion.work_type_code not in priority_codes:
+                priority_codes.append(suggestion.work_type_code)
         work_type_rows = list_work_type_codes(self.project_id, active_only=True)
         if priority_codes:
             priority_set = set(priority_codes)
@@ -289,35 +300,40 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.allocations.delete(*self.allocations.get_children())
         self.allocation_ids.clear()
         self.allocation_amounts.clear()
+        self.allocation_rates.clear()
+        self.allocation_gross.clear()
         allocated = 0
         for row in list_invoice_allocations(self.invoice_id):
             stored_amount = int(row["amount"])
+            tax_rate = str(row["tax_rate"])
             excluded_value = row["amount_excluded"]
-            amount_excluded = tax_excluded_amount(stored_amount) if excluded_value is None else int(excluded_value)
+            amount_excluded = tax_excluded_amount(stored_amount, tax_rate) if excluded_value is None else int(excluded_value)
             displayed_amount = self.amount_for_display(stored_amount, amount_excluded)
             display_amount = "" if amount_excluded == 0 else format_amount(displayed_amount)
             item_id = self.allocations.insert(
                 "",
                 tk.END,
-                values=(row["code"], row["name"], display_amount, row["memo"] or "", row["sort_order"]),
+                values=(row["code"], row["name"], display_amount, row["memo"] or "", row["sort_order"], TAX_RATE_LABELS[tax_rate]),
             )
             self.allocation_ids[item_id] = int(row["id"])
             self.allocation_amounts[item_id] = amount_excluded
-            allocated += amount_excluded
+            self.allocation_rates[item_id] = tax_rate
+            self.allocation_gross[item_id] = stored_amount
+            allocated += stored_amount
         first_item = next(iter(self.allocations.get_children()), None)
         if first_item:
             self.allocations.selection_set(first_item)
             self.allocations.focus(first_item)
-        invoice_total = self.invoice_total_excluded
+        invoice_total = self.invoice_total
         remaining = invoice_total - allocated
         if remaining < 0:
             self.allocation_summary_var.set(
-                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 超過額: {abs(remaining):,}円"
+                f"請求金額(税込): {invoice_total:,}円 / 振分合計(税込): {allocated:,}円 / 超過額: {abs(remaining):,}円"
             )
             self.allocation_summary_var.set(self.allocation_summary_var.get() + "  ※超過しています")
         else:
             self.allocation_summary_var.set(
-                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 未振分額: {remaining:,}円"
+                f"請求金額(税込): {invoice_total:,}円 / 振分合計(税込): {allocated:,}円 / 未振分額: {remaining:,}円"
             )
         self.update_mark_selection_status()
 
@@ -330,7 +346,8 @@ class InvoiceDetailWindow(tk.Toplevel):
 
     def update_amount_headers(self) -> None:
         if hasattr(self, "total_amount_label"):
-            self.total_amount_label.configure(text=f"請求金額({self.amount_display_mode}):")
+            basis = "税込" if self.amount_display_mode == "税込" else "税抜・10%換算"
+            self.total_amount_label.configure(text=f"請求金額({basis}):")
         if hasattr(self, "allocations"):
             self.allocations.heading("amount", text=f"振分金額({self.amount_display_mode})")
 
@@ -448,8 +465,61 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         item_id = selection[0]
         values = self.allocations.item(item_id, "values")
-        stored_values = (values[0], values[1], format_amount(self.allocation_amounts[item_id]), values[3], values[4])
+        stored_values = (values[0], values[1], format_amount(self.allocation_amounts[item_id]), values[3], values[4], self.allocation_rates[item_id], self.allocation_gross[item_id])
         self.open_allocation_dialog(self.allocation_ids[item_id], stored_values)
+
+    def open_transfer_preview(self) -> None:
+        from invoice_manager.ui.web_allocation_preview_window import WebAllocationPreviewWindow
+
+        WebAllocationPreviewWindow(self, self.invoice_id)
+
+    def get_history_suggestions(self):
+        from invoice_manager.services.historical_costs import list_historical_work_type_suggestions
+
+        return list_historical_work_type_suggestions(self.vendor_name_var.get())
+
+    def open_history_suggestions(self) -> None:
+        suggestions = self.get_history_suggestions()
+        if not suggestions:
+            messagebox.showinfo("履歴候補", "この会社の保管済み査定履歴はありません。管理メニューの「保管済み履歴・工事別実績」で履歴を取得してください。", parent=self)
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("この会社の保管済み履歴から工種を選択")
+        dialog.geometry("680x360")
+        dialog.transient(self)
+        ttk.Label(dialog, text="全工事の利用履歴です。名称・工種が今回の工事に合うか確認して選んでください。", wraplength=640).pack(anchor=tk.W, padx=12, pady=12)
+        tree = ttk.Treeview(dialog, columns=("code", "name", "count", "net"), show="headings", height=8)
+        for key, label, width in (("code", "工種コード", 100), ("name", "工種名", 240), ("count", "請求書数", 90), ("net", "履歴金額(税抜)", 150)):
+            tree.heading(key, text=label)
+            tree.column(key, width=width)
+        tree.pack(fill=tk.BOTH, expand=True, padx=12)
+        entries = {}
+        for item in suggestions:
+            key = tree.insert("", tk.END, values=(item.work_type_code, item.work_type_name, item.invoice_count, f"{item.net_amount:,}"))
+            entries[key] = item
+
+        def use_suggestion():
+            selected = tree.selection()
+            if not selected:
+                return
+            item = entries[selected[0]]
+            existing = next((row for row in list_work_type_codes(self.project_id) if row["code"] == item.work_type_code), None)
+            if existing and not existing["is_active"]:
+                messagebox.showinfo("無効な工種", "この工事で無効化されたコードです。工種コードマスタで確認してください。", parent=dialog)
+                return
+            name = existing["name"] if existing else item.work_type_name
+            try:
+                if existing is None:
+                    save_work_type_code(self.project_id, item.work_type_code, name)
+            except Exception as exc:
+                messagebox.showerror("工種追加エラー", str(exc), parent=dialog)
+                return
+            self.load_work_type_options()
+            dialog.destroy()
+            self.open_allocation_dialog(values=(item.work_type_code, name, "", "", "0", "10", 0))
+
+        ttk.Button(dialog, text="選択した工種で振分を入力", command=use_suggestion).pack(side=tk.LEFT, padx=12, pady=12)
+        ttk.Button(dialog, text="閉じる", command=dialog.destroy).pack(side=tk.RIGHT, padx=12, pady=12)
 
     def delete_allocation(self) -> None:
         selection = self.allocations.selection()
@@ -467,7 +537,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         dialog = tk.Toplevel(self)
         dialog.title("振分行（税抜入力）")
-        dialog.geometry("420x220")
+        dialog.geometry("460x340")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -475,6 +545,10 @@ class InvoiceDetailWindow(tk.Toplevel):
         amount_var = tk.StringVar()
         memo_var = tk.StringVar()
         sort_order_var = tk.StringVar(value="0")
+        tax_rate_var = tk.StringVar(value=TAX_RATE_LABELS[values[5] if values else "10"])
+        tax_amount_var = tk.StringVar()
+        gross_amount_var = tk.StringVar()
+        rate_keys = {label: key for key, label in TAX_RATE_LABELS.items()}
         if values:
             label_prefix = f"{values[0]}｜{values[1]}"
             for label in self.work_type_options:
@@ -495,10 +569,33 @@ class InvoiceDetailWindow(tk.Toplevel):
         ).grid(row=0, column=1, sticky=tk.W, padx=4, pady=(12, 4))
         tk.Label(dialog, text="金額(税抜)").grid(row=1, column=0, sticky=tk.W, padx=12, pady=4)
         tk.Entry(dialog, textvariable=amount_var).grid(row=1, column=1, sticky=tk.W, padx=4, pady=4)
-        tk.Label(dialog, text="メモ").grid(row=2, column=0, sticky=tk.W, padx=12, pady=4)
-        tk.Entry(dialog, textvariable=memo_var, width=36).grid(row=2, column=1, sticky=tk.W, padx=4, pady=4)
-        tk.Label(dialog, text="並び順").grid(row=3, column=0, sticky=tk.W, padx=12, pady=4)
-        tk.Entry(dialog, textvariable=sort_order_var).grid(row=3, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, text="税率").grid(row=2, column=0, sticky=tk.W, padx=12, pady=4)
+        ttk.Combobox(dialog, textvariable=tax_rate_var, values=list(rate_keys), state="readonly", width=12).grid(row=2, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, text="消費税額").grid(row=3, column=0, sticky=tk.W, padx=12, pady=4)
+        tk.Label(dialog, textvariable=tax_amount_var).grid(row=3, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, text="金額(税込)").grid(row=4, column=0, sticky=tk.W, padx=12, pady=4)
+        tk.Label(dialog, textvariable=gross_amount_var).grid(row=4, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, text="メモ").grid(row=5, column=0, sticky=tk.W, padx=12, pady=4)
+        tk.Entry(dialog, textvariable=memo_var, width=36).grid(row=5, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, text="並び順").grid(row=6, column=0, sticky=tk.W, padx=12, pady=4)
+        tk.Entry(dialog, textvariable=sort_order_var).grid(row=6, column=1, sticky=tk.W, padx=4, pady=4)
+
+        def update_tax_preview(*_args) -> None:
+            try:
+                net = int(amount_var.get().replace(",", "").strip() or "0")
+                rate = rate_keys[tax_rate_var.get()]
+                gross = tax_included_amount(net, rate)
+                if values and net == int(str(values[2]).replace(",", "")) and rate == values[5]:
+                    gross = values[6]
+                tax_amount_var.set(f"{gross - net:,}円")
+                gross_amount_var.set(f"{gross:,}円")
+            except (ValueError, KeyError):
+                tax_amount_var.set("—")
+                gross_amount_var.set("—")
+
+        amount_var.trace_add("write", update_tax_preview)
+        tax_rate_var.trace_add("write", update_tax_preview)
+        update_tax_preview()
 
         def save() -> None:
             try:
@@ -510,6 +607,7 @@ class InvoiceDetailWindow(tk.Toplevel):
                     memo=memo_var.get(),
                     sort_order=int(sort_order_var.get() or 0),
                     allocation_id=allocation_id,
+                    tax_rate=rate_keys[tax_rate_var.get()],
                 )
             except Exception as exc:
                 messagebox.showerror("保存エラー", str(exc))
@@ -518,7 +616,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             self.load_allocations()
 
         buttons = tk.Frame(dialog)
-        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=12, pady=10)
+        buttons.grid(row=7, column=0, columnspan=2, sticky=tk.W, padx=12, pady=10)
         tk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side=tk.LEFT, padx=4)
         dialog.wait_window()

@@ -19,7 +19,10 @@ class VendorWorkTypeCandidateWindow(tk.Toplevel):
         self.vendor_options: dict[str, int] = {}
         self.catalog_labels = [work_type_label(code, name) for code, name in WORK_TYPE_CODE_CATALOG]
         self.catalog_codes = {work_type_label(code, name): code for code, name in WORK_TYPE_CODE_CATALOG}
+        self.option_labels = list(self.catalog_labels)
+        self.option_codes = dict(self.catalog_codes)
         self.selected_vendor_var = tk.StringVar()
+        self.custom_code_var = tk.StringVar()
 
         self.load_vendor_options()
         self.build()
@@ -52,10 +55,16 @@ class VendorWorkTypeCandidateWindow(tk.Toplevel):
         self.listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, exportselection=False)
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=scrollbar.set)
-        for label in self.catalog_labels:
+        for label in self.option_labels:
             self.listbox.insert(tk.END, label)
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        custom_frame = tk.Frame(self, padx=10, pady=4)
+        custom_frame.pack(fill=tk.X)
+        tk.Label(custom_frame, text="追加候補コード").pack(side=tk.LEFT)
+        tk.Entry(custom_frame, textvariable=self.custom_code_var, width=18).pack(side=tk.LEFT, padx=4)
+        tk.Button(custom_frame, text="候補に追加", command=self.add_custom_code).pack(side=tk.LEFT, padx=4)
 
         actions = tk.Frame(self, padx=10, pady=10)
         actions.pack(fill=tk.X)
@@ -71,9 +80,20 @@ class VendorWorkTypeCandidateWindow(tk.Toplevel):
         vendor_id = self.selected_vendor_id()
         if not vendor_id:
             return
-        selected_codes = {row["code"] for row in list_vendor_work_type_candidates(vendor_id)}
-        for index, label in enumerate(self.catalog_labels):
-            if self.catalog_codes[label] in selected_codes:
+        rows = list_vendor_work_type_candidates(vendor_id)
+        self.option_labels = list(self.catalog_labels)
+        self.option_codes = dict(self.catalog_codes)
+        for row in rows:
+            label = work_type_label(row["code"], row["name"])
+            if label not in self.option_codes:
+                self.option_labels.append(label)
+                self.option_codes[label] = row["code"]
+        self.listbox.delete(0, tk.END)
+        for label in self.option_labels:
+            self.listbox.insert(tk.END, label)
+        selected_codes = {row["code"] for row in rows}
+        for index, label in enumerate(self.option_labels):
+            if self.option_codes[label] in selected_codes:
                 self.listbox.selection_set(index)
 
     def save(self) -> None:
@@ -81,9 +101,26 @@ class VendorWorkTypeCandidateWindow(tk.Toplevel):
         if not vendor_id:
             messagebox.showwarning("取引先未選択", "取引先を選択してください。")
             return
-        codes = [self.catalog_codes[self.catalog_labels[index]] for index in self.listbox.curselection()]
+        codes = [self.option_codes[self.option_labels[index]] for index in self.listbox.curselection()]
         saved_count = save_vendor_work_type_candidates(vendor_id, codes)
         messagebox.showinfo("保存完了", f"{saved_count}件の候補を保存しました。")
+
+    def add_custom_code(self) -> None:
+        code = self.custom_code_var.get().strip()
+        if not code:
+            messagebox.showwarning("入力不足", "候補コードを入力してください。")
+            return
+        if code in self.option_codes.values():
+            index = next(index for index, label in enumerate(self.option_labels) if self.option_codes[label] == code)
+            self.listbox.selection_set(index)
+            self.custom_code_var.set("")
+            return
+        label = work_type_label(code, code)
+        self.option_labels.append(label)
+        self.option_codes[label] = code
+        self.listbox.insert(tk.END, label)
+        self.listbox.selection_set(len(self.option_labels) - 1)
+        self.custom_code_var.set("")
 
     def select_all(self) -> None:
         self.listbox.selection_set(0, tk.END)

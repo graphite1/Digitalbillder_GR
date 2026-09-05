@@ -60,6 +60,18 @@ class WorkTypeMasterWindow(tk.Toplevel):
         project_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
         tk.Label(form, text="工種コード").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        tk.Entry(form, textvariable=self.code_var, width=18).grid(
+            row=1, column=1, sticky=tk.W, padx=4, pady=(8, 0)
+        )
+        tk.Label(form, text="工種名").grid(row=1, column=2, sticky=tk.W, pady=(8, 0))
+        tk.Entry(form, textvariable=self.name_var, width=24).grid(
+            row=1, column=3, sticky=tk.W, padx=4, pady=(8, 0)
+        )
+        tk.Label(form, text="並び順").grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
+        tk.Entry(form, textvariable=self.sort_order_var, width=8).grid(row=1, column=5, sticky=tk.W, padx=4, pady=(8, 0))
+        tk.Checkbutton(form, text="有効", variable=self.is_active_var).grid(row=1, column=6, sticky=tk.W, pady=(8, 0))
+
+        tk.Label(form, text="標準カタログ候補").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
         catalog_combo = ttk.Combobox(
             form,
             textvariable=self.selected_catalog_var,
@@ -67,15 +79,8 @@ class WorkTypeMasterWindow(tk.Toplevel):
             state="readonly",
             width=32,
         )
-        catalog_combo.grid(row=1, column=1, sticky=tk.W, padx=4, pady=(8, 0))
+        catalog_combo.grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=4, pady=(8, 0))
         catalog_combo.bind("<<ComboboxSelected>>", self.on_catalog_selected)
-        tk.Label(form, text="工種名").grid(row=1, column=2, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(form, textvariable=self.name_var, width=24, state="readonly").grid(
-            row=1, column=3, sticky=tk.W, padx=4, pady=(8, 0)
-        )
-        tk.Label(form, text="並び順").grid(row=1, column=4, sticky=tk.W, pady=(8, 0))
-        tk.Entry(form, textvariable=self.sort_order_var, width=8).grid(row=1, column=5, sticky=tk.W, padx=4, pady=(8, 0))
-        tk.Checkbutton(form, text="有効", variable=self.is_active_var).grid(row=1, column=6, sticky=tk.W, pady=(8, 0))
 
         actions = tk.Frame(self, padx=10)
         actions.pack(fill=tk.X)
@@ -118,8 +123,9 @@ class WorkTypeMasterWindow(tk.Toplevel):
             return
         values = self.tree.item(selection[0], "values")
         self.editing_id = self.work_type_ids[selection[0]]
-        label = work_type_label(values[0], WORK_TYPE_CODE_NAMES.get(values[0], values[1]))
-        self.selected_catalog_var.set(label if label in self.catalog_options else "")
+        catalog_name = WORK_TYPE_CODE_NAMES.get(values[0])
+        label = work_type_label(values[0], catalog_name) if catalog_name else ""
+        self.selected_catalog_var.set(label if label in self.catalog_options and values[1] == catalog_name else "")
         self.code_var.set(values[0])
         self.name_var.set(values[1])
         self.sort_order_var.set(values[2])

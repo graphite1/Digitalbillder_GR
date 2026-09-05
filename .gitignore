@@ -13,4 +13,6 @@ Sample/
 
 build/
 dist/
+.updates/
+tools/windows/.compile/
 共有用/*.png
