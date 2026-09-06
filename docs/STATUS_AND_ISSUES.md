@@ -4,7 +4,7 @@
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
 
-2026-09-06、名前が異常だったWindows管理ファイルと追加160件を修復。利用者の09:21の再起動後、残ったHyper-Vの `vmuidevices.dll` 1件もDISMで修復し、ImageHealthStateはHealthy、SFCは終了コード0で「整合性違反なし」を確認した。**Windowsの整合性修復は完了。修復後のSandbox・Hyper-V有効化は管理者確認の取り消しで未実行。** [修復結果と経過](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。自動再起動は実行していない。
+2026-09-06、異常名の管理ファイル、追加160件、Hyper-V DLL1件を修復し、DISM Healthy・SFC整合性違反なしを確認。しかし09:55のSandbox有効化で別のDirectPlay部品 `dpnaddr.dll` に同じ圧縮状態異常が発生。**追加機能の復旧は未完了。個別修復の反復を止め、アプリ・ファイル・設定を保持するWindows修復インストールへ切り替える。** 回復設定を開いたが、開始ボタンは利用者操作待ち。[最新状況と実行手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。自動再起動は実行していない。
 
 確認日: 2026-09-05（日本時間）
 

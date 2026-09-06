@@ -2,6 +2,31 @@
 
 確認日: 2026-09-06。原因調査の後、利用者の修復承認を受けて実行。再起動は自動実行しない。
 
+## 最新状況: 追加機能の復旧は未完了（09:55）
+
+管理者承認を受けてSandbox有効化を再試行したが、0x80073712で失敗した。修復済みのHyper-V DLLとは別に、今度は次のDirectPlay部品で `Unexpected compression state` が記録された。
+
+```text
+amd64_microsoft-windows-d..directplay8-payload_31bf3856ad364e35_10.0.26100.1150_none_9f6738de73cf4ce3/dpnaddr.dll
+```
+
+DISMのHealthy・SFC整合性違反なしは確認済みだが、追加機能を展開すると別の不整合が顕在化する。したがって、以下の09:43時点の「整合性修復完了」は検査対象範囲の結果であり、Windows全体の復旧やSandbox稼働完了を意味しない。今回は同じ全件取得・個別修復を繰り返さず、保持型の修復インストールへ進む方針。
+
+### 利用者側で必要な操作
+
+`ms-settings:recovery` を起動して回復設定を開いた。この接続のツールはWindows設定画面のボタン操作に対応していないため、開始操作は利用者が行う。再インストール自体はまだ開始していない。
+
+1. 「設定 → システム → 回復」で「Windows Updateで問題を解決」の「今すぐ再インストール」を選ぶ。
+2. 完了後15分で自動再起動する選択肢は外し、「OK」で開始する。
+3. 電源とインターネット接続を維持して完了を待つ。作業を保存し、完了後に通常再起動する。
+4. 再起動したらこのタスクで知らせる。Sandbox・Hyper-V有効化、必要な再起動、Sandbox初回導入試験を続ける。
+
+Microsoftによると、この方法は同じWindowsの版を再導入し、アプリ・個人ファイル・設定を保持する。「このPCをリセット」とは別の項目を選ぶ。表示されない場合は、適合する公式ISOで保持型修復を検討するため、その旨を知らせる。[Microsoft公式手順](https://support.microsoft.com/en-us/windows/deployment/install-upgrade/fix-issues-by-reinstalling-the-current-version-of-windows)
+
+09:55時点でCBSの再起動待ちはfalse。修復ソースの検査、署名照合済みMUMの復元、所有権の復元、DISM・SFCによるこれまでの修復結果は保全済み。WinSxSの削除、圧縮フラグの変更、別版DLLの流用はしていない。
+
+## 直前までの経過
+
 最新の修復結果（09:43）: 利用者の09:21の再起動後、残っていたHyper-V DLLの不整合1件をDISMで修復した。修復後のImageHealthStateはHealthy、SFCは終了コード0で「整合性違反を検出しませんでした」。Windowsの整合性修復は完了。Sandbox・Hyper-Vの有効化と起動確認は別途判定する。
 
 修復後の機能有効化は、管理者確認が「ユーザーによって取り消されました」で終了したため未実行。次回は管理者PowerShellで `tools/windows_test_environment/Enable-HostFeatures.ps1` を実行し、機能の状態を確認する。修復済みのDISM・SFCを理由なく繰り返す必要はない。以前の `feature-status.json` は09:12の失敗記録のままで、修復後の有効化結果ではない。

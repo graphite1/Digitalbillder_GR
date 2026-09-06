@@ -1,6 +1,6 @@
 # Windows初回導入・更新テスト環境
 
-最新状況（2026-09-06 09:43以降）: 再起動後、Hyper-V DLLの残り1件も修復し、Windowsの状態Healthy・SFC整合性違反なしを確認した。修復後の機能有効化は管理者確認の取り消しで未実行。次は下記Enable-HostFeatures.ps1の実行から再開する。[修復結果と経過](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。以下の初回エラー記録だけで現在の状態を判断しない。
+最新状況（2026-09-06 09:55）: 管理者承認後にSandbox有効化を再試行したが、別のDirectPlay部品で圧縮状態異常が発生。DISM・SFCの成功だけでは追加機能の復旧を確認できていない。保持型Windows修復インストールの開始操作待ち。[最新状況と修復手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。以下の初回エラー記録だけで現在の状態を判断しない。
 
 2026-09-06作成。開発本体の `tools/windows_test_environment/` に再現用スクリプト、生成物・ログはGit対象外の `作業補助/WindowsTest/` に保存する。
 
