@@ -95,9 +95,12 @@ class ProjectFilterPersistenceTests(unittest.TestCase):
             save_project_selection=Mock(side_effect=lambda: events.append("save")),
             on_close=Mock(side_effect=lambda: events.append("close")),
             destroy=Mock(),
+            _root=Mock(),
         )
 
-        invoice_list_window.InvoiceListWindow.close_window(window)
+        with patch.object(invoice_list_window, "running_activities", return_value=()), \
+                patch("invoice_manager.ui.main_window.has_busy_update", return_value=False):
+            invoice_list_window.InvoiceListWindow.close_window(window)
 
         self.assertEqual(events, ["save", "close"])
         window.destroy.assert_not_called()

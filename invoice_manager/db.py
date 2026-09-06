@@ -1,12 +1,48 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+_configured_data_dir = os.environ.get("DIGITALBUILDER_DATA_DIR", "").strip()
+DATA_DIR = (
+    Path(_configured_data_dir).expanduser().resolve()
+    if _configured_data_dir
+    else BASE_DIR / "data"
+)
 DB_PATH = DATA_DIR / "app.db"
+_transaction_connection: ContextVar[sqlite3.Connection | None] = ContextVar("transaction_connection", default=None)
+
+
+class BorrowedConnection:
+    """Repository context managers must not commit an enclosing transaction."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, *_args):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+@contextmanager
+def atomic_transaction():
+    if _transaction_connection.get() is not None:
+        raise RuntimeError("Nested atomic transactions are not supported")
+    with get_connection() as connection:
+        token = _transaction_connection.set(connection)
+        try:
+            yield
+        finally:
+            _transaction_connection.reset(token)
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -121,6 +157,8 @@ CREATE TABLE IF NOT EXISTS invoice_allocations (
     work_type_code_id INTEGER NOT NULL,
     amount INTEGER NOT NULL,
     amount_excluded INTEGER,
+    tax_rate TEXT NOT NULL DEFAULT '10' CHECK(tax_rate IN ('10', '8', 'exempt')),
+    tax_rounding_adjustment INTEGER NOT NULL DEFAULT 0,
     memo TEXT,
     sort_order INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -187,10 +225,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS web_allocation_guard (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    state TEXT NOT NULL CHECK(state IN ('unverified', 'ready', 'frozen')),
+    contract_version TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
+);
 """
 
 
 def get_connection() -> sqlite3.Connection:
+    active = _transaction_connection.get()
+    if active is not None:
+        return BorrowedConnection(active)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
@@ -209,6 +258,8 @@ def initialize_database() -> None:
         _migrate_projects_table(conn)
         _migrate_invoice_billing_month_override(conn)
         _migrate_tax_excluded_amounts(conn)
+        _migrate_allocation_tax_rate(conn)
+        _migrate_allocation_rounding_adjustment(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
 
 
@@ -387,6 +438,18 @@ def _migrate_invoice_billing_month_override(conn: sqlite3.Connection) -> None:
             "UPDATE invoices SET billing_month_manual_override = ? WHERE id = ?",
             updates,
         )
+
+
+def _migrate_allocation_rounding_adjustment(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(invoice_allocations)")}
+    if "tax_rounding_adjustment" not in columns:
+        conn.execute("ALTER TABLE invoice_allocations ADD COLUMN tax_rounding_adjustment INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_allocation_tax_rate(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(invoice_allocations)")}
+    if "tax_rate" not in columns:
+        conn.execute("ALTER TABLE invoice_allocations ADD COLUMN tax_rate TEXT NOT NULL DEFAULT '10' CHECK(tax_rate IN ('10', '8', 'exempt'))")
 
 
 def _migrate_tax_excluded_amounts(conn: sqlite3.Connection) -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-WORK_TYPE_CODE_CATALOG = (
+NUMERIC_WORK_TYPE_CODE_CATALOG = (
     ("301", "保険料"),
     ("302", "給与"),
     ("303", "法定福利費"),
@@ -44,8 +44,14 @@ WORK_TYPE_CODE_CATALOG = (
     ("607", "資機材賃損料"),
 )
 
-WORK_TYPE_CODE_NAMES = dict(WORK_TYPE_CODE_CATALOG)
-WORK_TYPE_CODE_ORDERS = {code: index for index, (code, _name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1)}
+# New project templates use the D-code rule; numeric source-document aliases remain usable.
+WORK_TYPE_CODE_CATALOG = tuple((f"D{code}", name) for code, name in NUMERIC_WORK_TYPE_CODE_CATALOG)
+WORK_TYPE_CODE_NAMES = dict(NUMERIC_WORK_TYPE_CODE_CATALOG + WORK_TYPE_CODE_CATALOG)
+WORK_TYPE_CODE_ORDERS = {
+    alias: index
+    for index, (code, _name) in enumerate(NUMERIC_WORK_TYPE_CODE_CATALOG, start=1)
+    for alias in (code, f"D{code}")
+}
 
 
 def work_type_label(code: str, name: str) -> str:

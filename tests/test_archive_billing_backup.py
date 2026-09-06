@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from invoice_manager import db, repositories
 
@@ -19,6 +21,13 @@ class ArchiveBillingBackupTests(unittest.TestCase):
         db.DATA_DIR = self.root / "data"
         db.DB_PATH = db.DATA_DIR / "app.db"
         db.initialize_database()
+        permission_patch = patch(
+            "invoice_manager.services.test_tools_access._ALLOWED_ACCOUNT_SHA256",
+            hashlib.sha256(b"test-admin@example.test").hexdigest(),
+        )
+        permission_patch.start()
+        self.addCleanup(permission_patch.stop)
+        repositories.set_app_setting("digital_billder_sync_account", "test-admin@example.test")
         self._ensure_manual_override_column()
 
     def tearDown(self) -> None:

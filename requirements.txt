@@ -2,3 +2,6 @@ openpyxl>=3.1.0
 tkinterdnd2
 PyMuPDF
 Pillow
+playwright>=1.50,<2
+keyring>=25,<26
+cryptography>=43,<47

@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from invoice_manager.db import get_connection
+from invoice_manager.db import atomic_transaction, get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.services.db_backup import create_database_backup
 from invoice_manager.utils.date_utils import billing_month_from_invoice_date, parse_invoice_date, validate_billing_month
-from invoice_manager.utils.money_utils import tax_excluded_amount, tax_included_amount
+from invoice_manager.utils.money_utils import tax_excluded_amount, tax_included_amount, tax_rate_percent
 from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES
+
+
+MAX_WORK_TYPE_CODE_LENGTH = 64
 
 
 def now_text() -> str:
@@ -290,12 +293,18 @@ def set_project_active(project_id: int, is_active: bool) -> None:
     add_audit_log(action, "projects", int(project_id), "")
 
 
-def list_billing_months(include_blank: bool = False, active_projects_only: bool = False) -> list[str]:
+def list_billing_months(
+    include_blank: bool = False, active_projects_only: bool = False, *, project_id: int | None = None
+) -> list[str]:
     where = []
+    params = []
     if not include_blank:
         where.append("COALESCE(invoices.billing_month, '') <> ''")
     if active_projects_only:
         where.append("projects.is_visible = 1")
+    if project_id is not None:
+        where.append("invoices.project_id = ?")
+        params.append(project_id)
     join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
     where_sql = " WHERE " + " AND ".join(where) if where else ""
     with get_connection() as conn:
@@ -305,14 +314,20 @@ def list_billing_months(include_blank: bool = False, active_projects_only: bool 
             {join}
             {where_sql}
             ORDER BY invoices.billing_month DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [row["billing_month"] for row in rows]
 
 
-def list_invoice_dates(active_projects_only: bool = False) -> list[str]:
+def list_invoice_dates(active_projects_only: bool = False, *, project_id: int | None = None) -> list[str]:
     join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
-    where = "WHERE projects.is_visible = 1" if active_projects_only else ""
+    conditions = ["projects.is_visible = 1"] if active_projects_only else []
+    params = []
+    if project_id is not None:
+        conditions.append("invoices.project_id = ?")
+        params.append(project_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
     with get_connection() as conn:
         rows = conn.execute(
             f"""
@@ -321,7 +336,8 @@ def list_invoice_dates(active_projects_only: bool = False) -> list[str]:
             {join}
             {where}
             ORDER BY invoices.invoice_date ASC
-            """
+            """,
+            params,
         ).fetchall()
     return [row["invoice_date"] for row in rows]
 
@@ -342,12 +358,18 @@ def get_or_create_vendor(vendor_name: str) -> int:
         return int(cur.lastrowid)
 
 
-def list_vendors(active_projects_only: bool = False) -> list:
+def list_vendors(active_projects_only: bool = False, *, project_id: int | None = None) -> list:
     join = ""
-    where = ""
-    if active_projects_only:
+    conditions = []
+    params = []
+    if active_projects_only or project_id is not None:
         join = "JOIN invoices ON invoices.vendor_id = vendors.id JOIN projects ON projects.id = invoices.project_id"
-        where = "WHERE projects.is_visible = 1"
+    if active_projects_only:
+        conditions.append("projects.is_visible = 1")
+    if project_id is not None:
+        conditions.append("invoices.project_id = ?")
+        params.append(project_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
     with get_connection() as conn:
         return list(
             conn.execute(
@@ -357,7 +379,8 @@ def list_vendors(active_projects_only: bool = False) -> list:
                 {join}
                 {where}
                 ORDER BY vendors.vendor_name ASC
-                """
+                """,
+                params,
             ).fetchall()
         )
 
@@ -691,6 +714,49 @@ def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> 
     return len(updates)
 
 
+def reset_invoice_billing_months_to_auto(invoice_ids: list[int]) -> int:
+    """Reset only the supplied visible invoices to the current automatic month rule."""
+    from invoice_manager.services.test_tools_access import require_test_tools_access
+
+    require_test_tools_access()
+    ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with atomic_transaction():
+        with get_connection() as conn:
+            _require_invoice_ids_visible(conn, ids)
+            rows = conn.execute(
+                f"""SELECT id, invoice_date, billing_month, billing_month_manual_override
+                    FROM invoices WHERE id IN ({placeholders}) ORDER BY id""",
+                ids,
+            ).fetchall()
+            timestamp = now_text()
+            updates = []
+            for row in rows:
+                try:
+                    invoice_date = parse_invoice_date(row["invoice_date"])
+                    automatic_month = billing_month_from_invoice_date(invoice_date)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"請求ID {row['id']} の請求日が未設定または不正なため、自動判定に戻せません。"
+                    ) from exc
+                if row["billing_month"] != automatic_month or row["billing_month_manual_override"]:
+                    updates.append((automatic_month, timestamp, int(row["id"])))
+            if not updates:
+                return 0
+            create_database_backup("before_billing_month_auto_reset")
+            conn.executemany(
+                """UPDATE invoices
+                   SET billing_month = ?, billing_month_manual_override = 0, updated_at = ?
+                   WHERE id = ?""",
+                updates,
+            )
+            changed_ids = ",".join(str(item[2]) for item in updates)
+            add_audit_log("請求月自動判定へリセット", "invoices", None, f"{len(updates)}件: 請求ID {changed_ids}")
+    return len(updates)
+
+
 def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
     ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
     if not ids:
@@ -719,6 +785,9 @@ def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
 
 
 def recalculate_invoice_billing_months(project_id: int) -> int:
+    from invoice_manager.services.test_tools_access import require_test_tools_access
+
+    require_test_tools_access()
     with get_connection() as conn:
         _require_project_visible(conn, project_id)
         rows = conn.execute(
@@ -776,15 +845,11 @@ def _remove_empty_parent_dirs(path: Path) -> None:
 def list_work_type_codes(project_id: int | None = None, active_only: bool = False) -> list:
     where = []
     params: list[int | str] = []
-    if project_id:
+    if project_id is not None:
         where.append("project_id = ?")
         params.append(int(project_id))
     if active_only:
         where.append("work_type_codes.is_active = 1")
-    catalog_codes = [code for code, _name in WORK_TYPE_CODE_CATALOG]
-    placeholders = ",".join("?" for _code in catalog_codes)
-    where.append(f"work_type_codes.code IN ({placeholders})")
-    params.extend(catalog_codes)
     sql = """
         SELECT work_type_codes.*, projects.project_code, projects.project_name
         FROM work_type_codes
@@ -808,23 +873,12 @@ def ensure_work_type_codes_for_project(project_id: int) -> int:
                 (int(project_id),),
             ).fetchall()
         }
-        updates = []
         inserts = []
         for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1):
             current = existing.get(code)
-            if current is None:
+            # Preserve legacy numeric master IDs, manual names and inactive state.
+            if current is None and code[1:] not in existing:
                 inserts.append((int(project_id), code, name, index, timestamp, timestamp))
-            elif current["name"] != name or int(current["sort_order"]) != index:
-                updates.append((name, index, timestamp, int(project_id), code))
-        if updates:
-            conn.executemany(
-                """
-                UPDATE work_type_codes
-                SET name = ?, sort_order = ?, updated_at = ?
-                WHERE project_id = ? AND code = ?
-                """,
-                updates,
-            )
         if not inserts:
             return 0
         cur = conn.executemany(
@@ -846,14 +900,30 @@ def save_work_type_code(
     is_active: int = 1,
     work_type_code_id: int | None = None,
 ) -> int:
-    code = code.strip()
-    name = WORK_TYPE_CODE_NAMES.get(code, "")
-    if not name:
-        raise ValueError("工種コードは指定の一覧から選択してください。")
+    code = str(code or "").strip()
+    name = str(name or "").strip()
+    if not code or not name:
+        raise ValueError("工種コードと工種名を入力してください。")
+    if len(code) > MAX_WORK_TYPE_CODE_LENGTH:
+        raise ValueError(f"工種コードは{MAX_WORK_TYPE_CODE_LENGTH}文字以内で入力してください。")
     timestamp = now_text()
     with get_connection() as conn:
         _require_project_visible(conn, project_id)
-        if work_type_code_id:
+        if work_type_code_id is not None:
+            existing = conn.execute(
+                "SELECT project_id FROM work_type_codes WHERE id = ?",
+                (int(work_type_code_id),),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("対象の工種コードが見つかりません。")
+            if int(existing["project_id"]) != int(project_id):
+                raise ValueError("別の工事の工種コードは変更できません。")
+            duplicate = conn.execute(
+                "SELECT id FROM work_type_codes WHERE project_id = ? AND code = ? AND id <> ?",
+                (int(project_id), code, int(work_type_code_id)),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("同じ工事に同じ工種コードが既に登録されています。")
             conn.execute(
                 """
                 UPDATE work_type_codes
@@ -865,6 +935,12 @@ def save_work_type_code(
             saved_id = int(work_type_code_id)
             action = "工種コード更新"
         else:
+            duplicate = conn.execute(
+                "SELECT id FROM work_type_codes WHERE project_id = ? AND code = ?",
+                (int(project_id), code),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("同じ工事に同じ工種コードが既に登録されています。")
             cur = conn.execute(
                 """
                 INSERT INTO work_type_codes
@@ -891,15 +967,28 @@ def list_vendor_work_type_candidates(vendor_id: int) -> list[dict[str, str | int
             (int(vendor_id),),
         ).fetchall()
     return [
-        {"code": row["code"], "name": WORK_TYPE_CODE_NAMES[row["code"]], "sort_order": row["sort_order"]}
+        {
+            "code": row["code"],
+            "name": WORK_TYPE_CODE_NAMES.get(row["code"], row["code"]),
+            "sort_order": row["sort_order"],
+        }
         for row in rows
-        if row["code"] in WORK_TYPE_CODE_NAMES
     ]
 
 
 def save_vendor_work_type_candidates(vendor_id: int, codes: list[str]) -> int:
     timestamp = now_text()
-    valid_codes = [code for code in codes if code in WORK_TYPE_CODE_NAMES]
+    valid_codes = []
+    seen_codes = set()
+    for raw_code in codes:
+        code = str(raw_code).strip()
+        if not code:
+            continue
+        if len(code) > MAX_WORK_TYPE_CODE_LENGTH:
+            raise ValueError(f"工種コードは{MAX_WORK_TYPE_CODE_LENGTH}文字以内で入力してください。")
+        if code not in seen_codes:
+            valid_codes.append(code)
+            seen_codes.add(code)
     with get_connection() as conn:
         conn.execute("DELETE FROM vendor_work_type_candidates WHERE vendor_id = ?", (int(vendor_id),))
         conn.executemany(
@@ -937,7 +1026,7 @@ def list_recent_work_type_codes_for_project_vendor(project_id: int, vendor_id: i
             """,
             (int(project_id), int(vendor_id), int(exclude_invoice_id)),
         ).fetchall()
-    return [row["code"] for row in rows if row["code"] in WORK_TYPE_CODE_NAMES]
+    return [row["code"] for row in rows]
 
 
 def list_invoice_allocations(invoice_id: int) -> list:
@@ -966,33 +1055,62 @@ def save_invoice_allocation(
     memo: str = "",
     sort_order: int = 0,
     allocation_id: int | None = None,
+    tax_rate: str | None = None,
 ) -> int:
     normalized_amount = 0 if amount is None else int(amount)
-    included_amount = tax_included_amount(normalized_amount)
     timestamp = now_text()
     with get_connection() as conn:
         _require_invoice_ids_visible(conn, [invoice_id])
+        work_type = conn.execute(
+            """
+            SELECT invoices.project_id AS invoice_project_id,
+                   work_type_codes.project_id AS work_type_project_id
+            FROM invoices
+            JOIN work_type_codes ON work_type_codes.id = ?
+            WHERE invoices.id = ?
+            """,
+            (int(work_type_code_id), int(invoice_id)),
+        ).fetchone()
+        if (
+            work_type is None
+            or work_type["work_type_project_id"] is None
+            or int(work_type["invoice_project_id"]) != int(work_type["work_type_project_id"])
+        ):
+            raise ValueError("振分の工種コードと請求書の工事が一致しません。")
+        existing = None
         if allocation_id:
             _require_allocation_visible(conn, allocation_id)
             existing = conn.execute(
-                "SELECT amount, amount_excluded FROM invoice_allocations WHERE id = ?",
+                "SELECT invoice_id, amount, amount_excluded, tax_rate, tax_rounding_adjustment FROM invoice_allocations WHERE id = ?",
                 (int(allocation_id),),
             ).fetchone()
-            if existing and int(existing["amount_excluded"]) == normalized_amount:
+            if existing is None or int(existing["invoice_id"]) != int(invoice_id):
+                raise ValueError("振分行と請求書が一致しません。")
+        resolved_rate = tax_rate if tax_rate is not None else (existing["tax_rate"] if existing else "10")
+        tax_rate_percent(resolved_rate)
+        included_amount = tax_included_amount(normalized_amount, resolved_rate)
+        rounding_adjustment = 0
+        if allocation_id:
+            if (existing["amount_excluded"] is not None
+                    and int(existing["amount_excluded"]) == normalized_amount
+                    and existing["tax_rate"] == resolved_rate):
                 included_amount = int(existing["amount"])
+                rounding_adjustment = int(existing["tax_rounding_adjustment"])
             conn.execute(
                 """
                 UPDATE invoice_allocations
-                SET work_type_code_id = ?, amount = ?, amount_excluded = ?, memo = ?, sort_order = ?, updated_at = ?
+                SET work_type_code_id = ?, amount = ?, amount_excluded = ?, tax_rate = ?, memo = ?, sort_order = ?, updated_at = ?, tax_rounding_adjustment = ?
                 WHERE id = ?
                 """,
                 (
                     work_type_code_id,
                     included_amount,
                     normalized_amount,
+                    resolved_rate,
                     memo,
                     sort_order,
                     timestamp,
+                    rounding_adjustment,
                     allocation_id,
                 ),
             )
@@ -1002,14 +1120,15 @@ def save_invoice_allocation(
             cur = conn.execute(
                 """
                 INSERT INTO invoice_allocations
-                    (invoice_id, work_type_code_id, amount, amount_excluded, memo, sort_order, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (invoice_id, work_type_code_id, amount, amount_excluded, tax_rate, memo, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     invoice_id,
                     work_type_code_id,
                     included_amount,
                     normalized_amount,
+                    resolved_rate,
                     memo,
                     sort_order,
                     timestamp,
@@ -1022,7 +1141,7 @@ def save_invoice_allocation(
         action,
         "invoice_allocations",
         saved_id,
-        f"税抜:{normalized_amount} 税込:{included_amount}",
+        f"税抜:{normalized_amount} 税率:{resolved_rate} 税込:{included_amount}",
     )
     return saved_id
 
