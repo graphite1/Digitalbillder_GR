@@ -1,5 +1,7 @@
 # Windows初回導入・更新テスト環境
 
+最新結果（2026-09-06 12:21）: **公開Windows版v1.0.4-r2の初回導入・PDF描画を空のSandboxで確認し、合格。** 証跡は `作業補助/WindowsTest/runs/20260906-122055-6be41a72/results/`。アプリのPDF描画メソッドと、候補版での共有ランタイム共存・再導入保護も検証した。[詳細](DISTRIBUTION_VERIFICATION.md)。以下の11:45の失敗は修正前の履歴。
+
 最新状況（2026-09-06 11:45）: 11:36の再起動後、Sandbox起動と公開セットアップの初回導入を実施。セットアップ終了コード0、Tk・SQLiteは合格したが、PDF部品のDLL読込みで失敗。**仮想試験環境は稼働したが、配布物の基本動作試験は不合格。** 証跡は `作業補助/WindowsTest/runs/20260906-113324-ee86dc3a/results/`。[配布物の問題と検証結果](DISTRIBUTION_VERIFICATION.md)を参照。Hyper-Vは有効化済みで、Windows ISO・ゲストOS導入・更新復旧試験は未完了。
 
 このPCではWSBの関連付けから起動できなかったため、`WindowsSandbox.exe "<WSBの絶対パス>"` で起動した。以下の古い未実施・再起動待ち記録は履歴として扱う。
