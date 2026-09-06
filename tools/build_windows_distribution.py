@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.build_release import DEFAULT_KEY_ID, load_or_create_signing_key
 from tools.build_windows_setup import compile_launcher
+from tools.windows_vc_runtime import copy_app_local_crt
 from updater import DEFAULT_UPDATE_BASE_URL, TRUSTED_PUBLIC_KEYS, get_runtime_fingerprint
 from updater.archive import extract_validated_archive, validate_archive, verify_extracted_release
 from updater.security import b64url_encode, verify_release_envelope
@@ -397,6 +398,18 @@ def _run_smoke_test(
             TK_LIBRARY=str(root / "runtime/tcl/tk8.6"),
         )
         checks = {
+            "vc_runtime": (
+                "import ctypes,pathlib,sys,pymupdf; from ctypes import wintypes; "
+                "k=ctypes.WinDLL('kernel32'); "
+                "k.GetModuleHandleW.argtypes=[wintypes.LPCWSTR]; k.GetModuleHandleW.restype=wintypes.HMODULE; "
+                "k.GetModuleFileNameW.argtypes=[wintypes.HMODULE,wintypes.LPWSTR,wintypes.DWORD]; "
+                "k.GetModuleFileNameW.restype=wintypes.DWORD; "
+                "expected=pathlib.Path(sys.executable).resolve().parent; "
+                "exec(\"for name in ('msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll'):\\n"
+                " h=k.GetModuleHandleW(name); assert h, name; b=ctypes.create_unicode_buffer(32768); "
+                "assert k.GetModuleFileNameW(h,b,len(b)); assert pathlib.Path(b.value).resolve()==expected/name, b.value\"); "
+                "print('private CRT verified')"
+            ),
             "runtime": (
                 "import sys, tkinter; "
                 "import openpyxl, pymupdf, PIL, playwright, keyring, cryptography; "
@@ -523,6 +536,8 @@ def build_distribution(args: argparse.Namespace) -> tuple[Path, Path, Path, dict
         runtime_root = portable_root / "runtime"
         runtime_root.mkdir()
         python_version = _copy_runtime(python_root, runtime_root)
+        crt_metadata = copy_app_local_crt(args.vc_runtime_dir, runtime_root)
+        _write_bytes(runtime_root / "vc-runtime.json", _canonical(crt_metadata))
         _copy_tree(venv_site, runtime_root / "Lib/site-packages", venv_site=True)
         if args.browser_mode == "full":
             assert playwright_root is not None and revisions is not None
@@ -607,6 +622,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--distribution-sequence", type=int, default=1)
     parser.add_argument("--build", type=int, default=1)
     parser.add_argument("--python-root", type=Path, default=DEFAULT_PYTHON_ROOT)
+    parser.add_argument("--vc-runtime-dir", type=Path, required=True,
+                        help="Microsoft署名付きx64 VC再配布DLLの専用フォルダー（システムDLLを収集しない）")
     parser.add_argument("--venv", type=Path, default=ROOT / ".venv")
     parser.add_argument("--playwright-root", type=Path, default=DEFAULT_PLAYWRIGHT_ROOT)
     parser.add_argument("--browser-mode", choices=_BROWSER_MODES, default="full")

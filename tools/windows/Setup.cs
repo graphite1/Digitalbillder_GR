@@ -591,7 +591,9 @@ namespace DigitalbuilderGR.WindowsSetup
             ProcessStartInfo start = new ProcessStartInfo
             {
                 FileName = python,
-                Arguments = "-E -s -B -X utf8 \"launcher.py\" --init-db",
+                // Validate PDF dependencies before committing the staged installation.
+                // In-memory synthetic PDF: no invoice data and no extra packages installed.
+                Arguments = "-E -s -B -X utf8 -c \"import pymupdf,runpy,sys; d=pymupdf.open(); d.new_page(); b=d.tobytes(); d.close(); p=pymupdf.open(stream=b,filetype='pdf'); pix=p[0].get_pixmap(); assert pix.width>0 and pix.height>0; p.close(); sys.argv=['launcher.py','--init-db']; runpy.run_path('launcher.py',run_name='__main__')\"",
                 WorkingDirectory = payloadRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -638,7 +640,7 @@ namespace DigitalbuilderGR.WindowsSetup
                 }
                 process.WaitForExit();
                 if (process.ExitCode != 0)
-                    throw new SetupException("同梱版の初期化確認に失敗しました。");
+                    throw new SetupException("同梱版のPDF表示部品または初期化の確認に失敗しました。既存のアプリは変更していません。");
             }
         }
 

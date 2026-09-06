@@ -17,6 +17,7 @@ namespace DigitalbuilderGR.WindowsSetup.Tests
             Run("quiet arguments require absolute isolated paths", TestQuietArguments);
             Run("Windows path components reject traversal, ADS and reserved names", TestUnsafeComponents);
             Run("workspace cleanup identity cannot escape its parent", TestWorkspaceIdentity);
+            Run("repeat setup rejects occupied destination without changing DLL or ledger", TestExistingDestination);
             Run("valid rooted ZIP extracts required portable files", TestValidArchive);
             Run("ZIP rejects traversal, duplicate-case paths, wrong roots and links", TestInvalidArchives);
             Console.WriteLine(failures == 0 ? "windows_setup_tests: ok" : "windows_setup_tests: failed=" + failures);
@@ -65,6 +66,37 @@ namespace DigitalbuilderGR.WindowsSetup.Tests
             {
                 PathSafety.ValidateWorkspace(Path.Combine(Path.GetTempPath(), "outside"), parent,
                     ".Digitalbuilder-setup-");
+            });
+        }
+
+        private static void TestExistingDestination()
+        {
+            WithTemporaryDirectory(delegate(string temporary)
+            {
+                string destination = Path.Combine(temporary, "app");
+                string runtime = Path.Combine(destination, "runtime");
+                string data = Path.Combine(destination, "data");
+                Directory.CreateDirectory(runtime);
+                Directory.CreateDirectory(data);
+                string dll = Path.Combine(runtime, "msvcp140.dll");
+                string ledger = Path.Combine(data, "ledger.sqlite3");
+                File.WriteAllText(dll, "existing runtime must remain unchanged");
+                File.WriteAllText(ledger, "existing ledger must remain unchanged");
+                MethodInfo method = typeof(InstallerEngine).GetMethod("ValidateEmptyDestination",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                ExpectSetupException(delegate
+                {
+                    try { method.Invoke(null, new object[] { destination }); }
+                    catch (TargetInvocationException exception)
+                    {
+                        if (exception.InnerException != null) throw exception.InnerException;
+                        throw;
+                    }
+                });
+                Assert(File.ReadAllText(dll) == "existing runtime must remain unchanged", "existing DLL changed");
+                Assert(File.ReadAllText(ledger) == "existing ledger must remain unchanged", "existing ledger changed");
+                Assert(Directory.GetFiles(destination, "*", SearchOption.AllDirectories).Length == 2,
+                    "repeat setup created duplicate files");
             });
         }
 

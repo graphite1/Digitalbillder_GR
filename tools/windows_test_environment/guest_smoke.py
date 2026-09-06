@@ -111,6 +111,30 @@ def tkinter_check() -> dict[str, Any]:
         root.destroy()
 
 
+def private_crt_check(install_root: Path) -> dict[str, Any]:
+    """Check already-loaded DLLs, so a host/system copy cannot mask omissions."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel.GetModuleHandleW.restype = wintypes.HMODULE
+    kernel.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    kernel.GetModuleFileNameW.restype = wintypes.DWORD
+    paths = {}
+    for name in ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+        handle = kernel.GetModuleHandleW(name)
+        if not handle:
+            return _result("fail", f"DLL is not loaded: {name}")
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not kernel.GetModuleFileNameW(handle, buffer, len(buffer)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        paths[name] = buffer.value
+        if Path(buffer.value).resolve() != (install_root / "runtime" / name).resolve():
+            return _result("fail", f"DLL loaded outside app runtime: {name}", loaded_paths=paths)
+    return _result("pass", "VC DLLs loaded from private runtime", loaded_paths=paths)
+
+
 def sqlite_check(work: Path) -> dict[str, Any]:
     database = work / "synthetic.sqlite3"
     with closing(sqlite3.connect(database)) as connection:
@@ -135,6 +159,7 @@ def run_checks(install_root: Path) -> dict[str, Any]:
             "installed_layout": layout_check(install_root),
             "imports": imports_check(),
             "pdf_render": _run("pdf_render", lambda: pdf_check(work)),
+            "private_crt": _run("private_crt", lambda: private_crt_check(install_root)),
             "tk_window": _run("tk_window", tkinter_check),
             "sqlite_reopen": _run("sqlite_reopen", lambda: sqlite_check(work)),
             "network": _result("pass", "ネットワーク処理を実装せず、外部接続なし"),

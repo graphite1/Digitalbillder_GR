@@ -63,6 +63,12 @@ ZIPを直接取得した場合は、ZIP内から直接実行せず、すべて�
 
 ### 新規PC向け同梱版も更新する
 
+2026-09-06以降は `build_windows_distribution.py --vc-runtime-dir <検証済みx64再配布DLLフォルダー>` が必須。公式のVisual C++再配布元から `msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll` を同じ版で準備する。ビルダーはMicrosoft署名、x64、版一致、SHA256、リンク不在を確認し、アプリ専用runtimeに配置する。System32や他アプリからDLLを拾う運用はしない。`runtime/vc-runtime.json` に版・ファイル名・ハッシュを記録し、署名ZIPの対象に含める。
+
+確認済みの供給元は [Microsoft公式VC再配布パッケージ](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) のx64版14.51.36247.0。ローカル取得EXEのSHA256は `843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c`。展開元は `作業補助/WindowsTest/pdf-runtime-source/` に保管し、一般配布・Gitへ開発用原本を含めない。将来の取得では公式署名と版を改めて照合する。
+
+アプリ専用DLLはWindows Updateによる共有ランタイム更新とは別に管理されるため、配布環境を更新する際に公式ランタイムの更新も確認する。セットアップの再実行は既存の空でない保存先を拒否する。新規同梱版を台帳やruntimeへ手動で上書きしない。今回のDLL追加は通常のコード更新では既存導入先へ届かず、既存環境の移行はバックアップを含む別の手順として扱う。
+
 署名済みコードZIPとmanifestを `tools/build_windows_distribution.py` の `--release-zip` と `--release-manifest` に指定します。`--distribution-sequence` はWindows版専用の未使用連番、`--build` は同じアプリ版の同梱セット番号です。2026-09-05時点の公開版はアプリ1.0.3・コード番号3、Windows配布番号2・build2です。これらの番号と出力フォルダーを使い回しません。
 
 生成したWindows ZIPと専用manifestを管理画面のWindows版欄から登録・公開し、サイトから実際に取得したZIPを別フォルダーへ解凍します。同梱runtimeのみで起動.bat・ログイン保存・実データ取得・再起動後の表示を確認してください。実測記録は [配布版の実機検証](DISTRIBUTION_VERIFICATION.md) を参照します。
