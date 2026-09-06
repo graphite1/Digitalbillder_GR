@@ -7,11 +7,13 @@ Digital Billderを置き換えず、CSVとzip内PDF原本をローカルで保�
 
 ## 開発進度マップ
 
-**v1.0.4／2026年9月6日時点。** 実装済み・改善候補・未実装・保留をイラストで確認できます。
+**最新公開版v1.0.5／2026年9月6日時点。** イラストはv1.0.4時点の記録です。その後の変更は進度マップの表と最新の課題を参照してください。
 
 [![Digitalbuilder GR 開発進度マップ](docs/assets/progress-map-2026-09-06.png)](docs/PROGRESS_MAP.md)
 
 [進度マップと説明](docs/PROGRESS_MAP.md) · [最新の課題と実装条件](docs/STATUS_AND_ISSUES.md)
+
+[開発環境の変化と評価（2026年9月5日〜6日）](docs/DEVELOPMENT_ENVIRONMENT_RETROSPECTIVE_2026-09-06.md)
 
 今後の課題: [工種振分をWebへ転記し、最終提出・承認前で止める](docs/WEB_ALLOCATION_HANDOFF.md)
 （調査結果・実装手順を整理済み。Web更新機能は未実装。）
