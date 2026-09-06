@@ -1,6 +1,6 @@
 # Windows初回導入・更新テスト環境
 
-最新状況（2026-09-06 09:16）: Windows管理ファイルと追加160件の修復は成功。Sandbox有効化で新たに確認したHyper-V DLLの不整合1件が残り、Windowsは再起動待ち。[修復結果と再開手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。以下の初回エラー記録だけで現在の状態を判断しない。
+最新状況（2026-09-06 09:43以降）: 再起動後、Hyper-V DLLの残り1件も修復し、Windowsの状態Healthy・SFC整合性違反なしを確認した。修復後の機能有効化は管理者確認の取り消しで未実行。次は下記Enable-HostFeatures.ps1の実行から再開する。[修復結果と経過](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。以下の初回エラー記録だけで現在の状態を判断しない。
 
 2026-09-06作成。開発本体の `tools/windows_test_environment/` に再現用スクリプト、生成物・ログはGit対象外の `作業補助/WindowsTest/` に保存する。
 
