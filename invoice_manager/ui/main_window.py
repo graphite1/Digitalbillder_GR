@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import os
 import webbrowser
 from tkinter import messagebox, simpledialog, ttk
 from urllib.parse import urlparse
@@ -186,6 +187,9 @@ class MainWindow:
         VendorWorkTypeCandidateWindow(self.root)
 
     def open_update(self) -> None:
+        if os.environ.get("DIGITALBUILDER_DEVELOPMENT") == "1":
+            messagebox.showinfo("開発本体で起動中", "現在は開発フォルダーのコードを使っています。開発本体の更新はGitで行います。配布版のアプリ内更新は配布先で使用してください。", parent=self.root)
+            return
         from invoice_manager.ui.update_window import UpdateWindow
 
         for child in self.root.winfo_children():

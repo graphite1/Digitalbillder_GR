@@ -49,7 +49,7 @@ class InvoiceListWindow(tk.Toplevel):
         open_hub: Callable[[tk.Toplevel], None] | None = None,
     ) -> None:
         super().__init__(master)
-        self.title("請求一覧")
+        self.title("請求一覧【開発本体】" if os.environ.get("DIGITALBUILDER_DEVELOPMENT") == "1" else "請求一覧")
         self.geometry("1440x840")
         self.minsize(1100, 740)
         self.on_close = on_close

@@ -32,7 +32,28 @@ def _base_environment(install_root: Path, data_dir: Path) -> dict[str, str]:
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment[INSTALL_ROOT_ENV] = str(install_root)
     environment[DATA_DIR_ENV] = str(data_dir)
+    environment.pop("DIGITALBUILDER_DEVELOPMENT", None)
     return environment
+
+
+def _launch_development(install_root: Path, data_dir: Path, arguments: list[str], environment: dict[str, str]) -> int:
+    app_path = install_root / "app.py"
+    if not (install_root / ".git").exists() or not app_path.is_file():
+        print("開発起動はGit管理された開発本体でのみ使用できます。", file=sys.stderr)
+        return 1
+    try:
+        if (data_dir / "app.db").is_file():
+            from invoice_manager.services.db_backup import create_database_backup
+            create_database_backup("before_development", source_path=data_dir / "app.db")
+        environment["DIGITALBUILDER_DEVELOPMENT"] = "1"
+        completed = subprocess.run(
+            [sys.executable, "-B", "-X", "utf8", str(app_path), *arguments],
+            cwd=install_root, env=environment, check=False,
+        )
+        return int(completed.returncode)
+    except Exception:
+        print("開発起動または起動前バックアップに失敗しました。アプリは起動できませんでした。", file=sys.stderr)
+        return 1
 
 
 def run_release_healthcheck(
@@ -80,11 +101,16 @@ def launch(argv: list[str] | None = None) -> int:
     configured_data = os.environ.get(DATA_DIR_ENV, "").strip()
     data_dir = Path(configured_data).expanduser().resolve() if configured_data else install_root / "data"
     arguments = list(sys.argv[1:] if argv is None else argv)
+    development = "--development" in arguments
+    if development:
+        arguments = [argument for argument in arguments if argument != "--development"]
     environment = _base_environment(install_root, data_dir)
     fingerprint = get_runtime_fingerprint()
 
     try:
         with application_lock(install_root):
+            if development:
+                return _launch_development(install_root, data_dir, arguments, environment)
             while True:
                 try:
                     activate_pending(
