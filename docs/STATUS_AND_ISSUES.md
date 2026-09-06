@@ -1,5 +1,7 @@
 # 現状と課題
 
+[イラストで見る開発進度マップ](PROGRESS_MAP.md)（2026年9月6日時点）。実装済み・未実装・保留の概要を掲載。詳細と最新の判断は本ページを参照する。
+
 ## Windows仮想テスト環境（2026-09-06）
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
