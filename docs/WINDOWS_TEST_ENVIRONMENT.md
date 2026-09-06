@@ -1,6 +1,6 @@
 # Windows初回導入・更新テスト環境
 
-最新状況（2026-09-06 09:55）: 管理者承認後にSandbox有効化を再試行したが、別のDirectPlay部品で圧縮状態異常が発生。DISM・SFCの成功だけでは追加機能の復旧を確認できていない。保持型Windows修復インストールの開始操作待ち。[最新状況と修復手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。以下の初回エラー記録だけで現在の状態を判断しない。
+最新状況（2026-09-06 11:18）: 保持型Windows修復更新を開始し、利用者の指示による監視・1回の再起動を実施。再起動後にSandbox有効化を試したが、DirectPlayの `dpnhpast.dll` の圧縮状態異常で0x80073712となった。修復更新の最終成功は未確認。監視は停止済みで、追加の自動再起動は行わない。[最新状況と修復手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox・Hyper-Vの稼働確認は未完了。
 
 2026-09-06作成。開発本体の `tools/windows_test_environment/` に再現用スクリプト、生成物・ログはGit対象外の `作業補助/WindowsTest/` に保存する。
 
