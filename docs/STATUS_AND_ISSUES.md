@@ -6,7 +6,7 @@
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
 
-2026-09-06 11:33、Windows Update画面から修復更新の再起動を行った後、**Sandbox・Hyper-Vの有効化が両方成功。追加機能を使い始めるための通常再起動待ち。** 以前の0x80073712は今回の有効化では発生していない。試験一式を本体内に準備済み。更新監視は停止済みで、追加の自動再起動は行っていない。[最新状況と実行手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。
+2026-09-06 11:45、再起動後に**Sandbox起動と公開セットアップの初回導入試験を実施**。セットアップ・Tk・SQLiteは成功したが、PyMuPDFのDLL読込みとPDF描画は失敗し、基本動作試験全体は不合格。仮想環境を妨げていたWindows部品エラーは今回発生していない。次の課題は配布物のPDF依存部品の確認・修正。[検証結果](DISTRIBUTION_VERIFICATION.md)と[Windows修復記録](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Hyper-Vは有効化済みだが、Windows ISO・ゲストOS導入・更新復旧試験は未完了。
 
 確認日: 2026-09-05（日本時間）
 
