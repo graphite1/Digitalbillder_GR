@@ -6,7 +6,7 @@
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
 
-2026-09-06、保持型Windows修復更新を開始し、利用者の指示で5分間隔の監視と1回の再起動を実施。11:09の起動・再起動要求の解消を確認したが、11:18のSandbox有効化はDirectPlayの `dpnhpast.dll` の圧縮状態異常で0x80073712。**追加機能の復旧は未完了。修復更新の最終成功もまだ確認できていない。** 監視は停止済みで、再起動を繰り返さない。[最新状況と実行手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。
+2026-09-06 11:33、Windows Update画面から修復更新の再起動を行った後、**Sandbox・Hyper-Vの有効化が両方成功。追加機能を使い始めるための通常再起動待ち。** 以前の0x80073712は今回の有効化では発生していない。試験一式を本体内に準備済み。更新監視は停止済みで、追加の自動再起動は行っていない。[最新状況と実行手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。
 
 確認日: 2026-09-05（日本時間）
 
