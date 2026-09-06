@@ -4,7 +4,7 @@
 
 初回導入用Windows Sandboxと更新・復旧用Hyper-Vの準備を追加。再現スクリプトは `tools/windows_test_environment/`、生成物は `作業補助/WindowsTest/` に集約する。実台帳・資格情報は共有しない。[実行手順と確認範囲](WINDOWS_TEST_ENVIRONMENT.md)を参照。
 
-ホスト機能有効化はWindowsコンポーネントストア破損（0x80073712）で失敗。DISM標準修復は2026-09-06 08:29に修復コンテンツ不足（0x800f0915）で失敗したが、ログ上は3,600件中3,599件を修復済み。追加調査で、残った管理ファイル1件の名前の1文字異常を特定。内容は対応するMicrosoft署名付きCATのハッシュと一致し、正常名の修復候補をローカルへ準備した。[原因と修復案](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。新たな修復とSandboxでの導入・Hyper-VゲストOS導入・更新復旧試験は未実行。再起動も実行していない。
+2026-09-06、Windows管理ファイルの名前1文字の異常を特定し、Microsoft署名付きCATと内容を照合してDISMで正常名へ復元。権限も元ファイルと一致させた。続くWindows Update経由のDISMで160件を修復し、DISM・SFCは終了コード0。ただしSandbox有効化はHyper-Vの `vmuidevices.dll` の圧縮状態不整合で失敗し、再検査で残り1件を確認した。**現在は大部分修復済み・残り1件・Windows再起動待ち。完全復旧や仮想環境の稼働完了ではない。** [修復結果と再起動後の手順](WINDOWS_REPAIR_DIAGNOSIS.md)を参照。Sandbox導入試験・Hyper-VゲストOS導入・更新復旧試験は未完了。自動再起動は実行していない。
 
 確認日: 2026-09-05（日本時間）
 
