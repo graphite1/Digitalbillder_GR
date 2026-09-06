@@ -293,12 +293,18 @@ def set_project_active(project_id: int, is_active: bool) -> None:
     add_audit_log(action, "projects", int(project_id), "")
 
 
-def list_billing_months(include_blank: bool = False, active_projects_only: bool = False) -> list[str]:
+def list_billing_months(
+    include_blank: bool = False, active_projects_only: bool = False, *, project_id: int | None = None
+) -> list[str]:
     where = []
+    params = []
     if not include_blank:
         where.append("COALESCE(invoices.billing_month, '') <> ''")
     if active_projects_only:
         where.append("projects.is_visible = 1")
+    if project_id is not None:
+        where.append("invoices.project_id = ?")
+        params.append(project_id)
     join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
     where_sql = " WHERE " + " AND ".join(where) if where else ""
     with get_connection() as conn:
@@ -308,14 +314,20 @@ def list_billing_months(include_blank: bool = False, active_projects_only: bool 
             {join}
             {where_sql}
             ORDER BY invoices.billing_month DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [row["billing_month"] for row in rows]
 
 
-def list_invoice_dates(active_projects_only: bool = False) -> list[str]:
+def list_invoice_dates(active_projects_only: bool = False, *, project_id: int | None = None) -> list[str]:
     join = "JOIN projects ON projects.id = invoices.project_id" if active_projects_only else ""
-    where = "WHERE projects.is_visible = 1" if active_projects_only else ""
+    conditions = ["projects.is_visible = 1"] if active_projects_only else []
+    params = []
+    if project_id is not None:
+        conditions.append("invoices.project_id = ?")
+        params.append(project_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
     with get_connection() as conn:
         rows = conn.execute(
             f"""
@@ -324,7 +336,8 @@ def list_invoice_dates(active_projects_only: bool = False) -> list[str]:
             {join}
             {where}
             ORDER BY invoices.invoice_date ASC
-            """
+            """,
+            params,
         ).fetchall()
     return [row["invoice_date"] for row in rows]
 
@@ -345,12 +358,18 @@ def get_or_create_vendor(vendor_name: str) -> int:
         return int(cur.lastrowid)
 
 
-def list_vendors(active_projects_only: bool = False) -> list:
+def list_vendors(active_projects_only: bool = False, *, project_id: int | None = None) -> list:
     join = ""
-    where = ""
-    if active_projects_only:
+    conditions = []
+    params = []
+    if active_projects_only or project_id is not None:
         join = "JOIN invoices ON invoices.vendor_id = vendors.id JOIN projects ON projects.id = invoices.project_id"
-        where = "WHERE projects.is_visible = 1"
+    if active_projects_only:
+        conditions.append("projects.is_visible = 1")
+    if project_id is not None:
+        conditions.append("invoices.project_id = ?")
+        params.append(project_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
     with get_connection() as conn:
         return list(
             conn.execute(
@@ -360,7 +379,8 @@ def list_vendors(active_projects_only: bool = False) -> list:
                 {join}
                 {where}
                 ORDER BY vendors.vendor_name ASC
-                """
+                """,
+                params,
             ).fetchall()
         )
 

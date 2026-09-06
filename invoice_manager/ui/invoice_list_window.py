@@ -192,11 +192,13 @@ class InvoiceListWindow(tk.Toplevel):
 
     def load_vendor_options(self) -> None:
         self.vendor_options = {"すべて": None}
-        for row in list_vendors(active_projects_only=True):
+        project_id = self.project_options.get(self.selected_project_var.get())
+        for row in list_vendors(active_projects_only=True, project_id=project_id):
             self.vendor_options[row["vendor_name"]] = int(row["id"])
 
     def load_month_options(self) -> None:
-        months = list_billing_months(include_blank=True, active_projects_only=True)
+        project_id = self.project_options.get(self.selected_project_var.get())
+        months = list_billing_months(include_blank=True, active_projects_only=True, project_id=project_id)
         self.month_options = {"すべて": None}
         if "" in months:
             self.month_options["未設定"] = "__blank__"
@@ -205,11 +207,15 @@ class InvoiceListWindow(tk.Toplevel):
 
     def load_invoice_date_options(self) -> None:
         self.invoice_date_options = {"すべて": None}
-        for date_text in list_invoice_dates(active_projects_only=True):
+        project_id = self.project_options.get(self.selected_project_var.get())
+        for date_text in list_invoice_dates(active_projects_only=True, project_id=project_id):
             self.invoice_date_options[format_invoice_date(date_text)] = date_text
 
     def reload_filter_options(self) -> None:
         self.load_project_options()
+        if self.selected_project_var.get() not in self.project_options:
+            self.selected_project_var.set("すべて")
+        self.restore_project_selection()
         self.load_vendor_options()
         self.load_month_options()
         self.load_invoice_date_options()
@@ -225,7 +231,6 @@ class InvoiceListWindow(tk.Toplevel):
             combo.configure(values=list(options.keys()))
             if variable.get() not in options:
                 variable.set("すべて")
-        self.restore_project_selection()
         self.refresh()
 
     def _build_tree(self) -> None:
@@ -448,7 +453,7 @@ class InvoiceListWindow(tk.Toplevel):
 
     def on_project_filter_selected(self, _event=None) -> None:
         self.save_project_selection()
-        self.refresh()
+        self.reload_filter_options()
 
     def on_tree_mousewheel(self, event) -> str:
         units = -5 if event.delta > 0 else 5
