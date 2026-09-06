@@ -42,7 +42,7 @@ class InvoiceAllocationDisplayTests(unittest.TestCase):
         self.assertEqual(self.view.allocation_summary_var.get(),
                          "請求金額(税抜): 420,000円 / 振分合計(税抜): 0円 / 未振分額(税抜): 420,000円")
 
-    def test_mixed_rates_and_rounding_keep_net_when_global_mode_changes(self):
+    def test_mixed_rates_summary_follows_mode_while_rows_keep_net(self):
         # Net values must not be reconstructed by dividing the gross sum by 1.1.
         rows = [self.row(1, 110, 101, "10"), self.row(2, 108, 100, "8"),
                 self.row(3, 100, 100, "exempt")]
@@ -54,8 +54,9 @@ class InvoiceAllocationDisplayTests(unittest.TestCase):
                 self.assertEqual(self.view.allocations.heading("amount", "text"), "振分金額(税抜)")
                 self.assertEqual([self.view.allocations.item(item, "values")[2]
                                   for item in self.view.allocations.get_children()], ["101", "100", "100"])
+                total = 318 if mode == "税込" else 301
                 self.assertEqual(self.view.allocation_summary_var.get(),
-                                 "請求金額(税抜): 301円 / 振分合計(税抜): 301円 / 未振分額(税抜): 0円")
+                                 f"請求金額({mode}): {total}円 / 振分合計({mode}): {total}円 / 未振分額({mode}): 0円")
                 self.assertEqual(list(self.view.allocation_gross.values()), [110, 108, 100])
                 self.assertEqual(self.view.info_vars["total_amount"].get(),
                                  "318円" if mode == "税込" else "301円")
@@ -69,6 +70,20 @@ class InvoiceAllocationDisplayTests(unittest.TestCase):
             self.view.load_allocations()
         self.assertEqual(self.view.allocation_summary_var.get(),
                          "請求金額(税抜): 290円 / 振分合計(税抜): 300円 / 超過額(税抜): 10円  ※超過しています")
+        with patch("invoice_manager.ui.invoice_detail_window.list_invoice_allocations", return_value=rows):
+            self.view.set_amount_display_mode("税込")
+        self.assertEqual(self.view.allocation_summary_var.get(),
+                         "請求金額(税込): 310円 / 振分合計(税込): 318円 / 超過額(税込): 8円  ※超過しています")
+
+    def test_remaining_amount_switches_between_saved_net_and_gross(self):
+        rows = [self.row(1, 110000, 100000, "10")]
+        with patch("invoice_manager.ui.invoice_detail_window.list_invoice_allocations", return_value=rows):
+            self.view.set_amount_display_mode("税込")
+            self.assertEqual(self.view.allocation_summary_var.get(),
+                             "請求金額(税込): 462,000円 / 振分合計(税込): 110,000円 / 未振分額(税込): 352,000円")
+            self.view.set_amount_display_mode("税抜")
+            self.assertEqual(self.view.allocation_summary_var.get(),
+                             "請求金額(税抜): 420,000円 / 振分合計(税抜): 100,000円 / 未振分額(税抜): 320,000円")
 
     def test_dialog_accepts_digits_and_shows_official_code_before_save(self):
         self.root.invoice_id = 1

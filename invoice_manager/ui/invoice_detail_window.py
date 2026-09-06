@@ -350,21 +350,22 @@ class InvoiceDetailWindow(tk.Toplevel):
             self.allocation_amounts[item_id] = amount_excluded
             self.allocation_rates[item_id] = tax_rate
             self.allocation_gross[item_id] = stored_amount
-            allocated += amount_excluded
+            allocated += self.amount_for_display(stored_amount, amount_excluded)
         first_item = next(iter(self.allocations.get_children()), None)
         if first_item:
             self.allocations.selection_set(first_item)
             self.allocations.focus(first_item)
-        invoice_total = self.invoice_total_excluded
+        invoice_total = self.amount_for_display(self.invoice_total, self.invoice_total_excluded)
+        basis = "税込" if self.amount_display_mode == "税込" else "税抜"
         remaining = invoice_total - allocated
         if remaining < 0:
             self.allocation_summary_var.set(
-                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 超過額(税抜): {abs(remaining):,}円"
+                f"請求金額({basis}): {invoice_total:,}円 / 振分合計({basis}): {allocated:,}円 / 超過額({basis}): {abs(remaining):,}円"
             )
             self.allocation_summary_var.set(self.allocation_summary_var.get() + "  ※超過しています")
         else:
             self.allocation_summary_var.set(
-                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 未振分額(税抜): {remaining:,}円"
+                f"請求金額({basis}): {invoice_total:,}円 / 振分合計({basis}): {allocated:,}円 / 未振分額({basis}): {remaining:,}円"
             )
         self.update_mark_selection_status()
 
