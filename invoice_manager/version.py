@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 
-APP_VERSION = "1.0.5"
-RELEASE_SEQUENCE = 5
+APP_VERSION = "1.0.6"
+RELEASE_SEQUENCE = 6
 
 
 __all__ = ["APP_VERSION", "RELEASE_SEQUENCE"]
