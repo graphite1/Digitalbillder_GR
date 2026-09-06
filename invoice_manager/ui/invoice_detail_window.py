@@ -308,8 +308,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             tax_rate = str(row["tax_rate"])
             excluded_value = row["amount_excluded"]
             amount_excluded = tax_excluded_amount(stored_amount, tax_rate) if excluded_value is None else int(excluded_value)
-            displayed_amount = self.amount_for_display(stored_amount, amount_excluded)
-            display_amount = "" if amount_excluded == 0 else format_amount(displayed_amount)
+            display_amount = "" if amount_excluded == 0 else format_amount(amount_excluded)
             item_id = self.allocations.insert(
                 "",
                 tk.END,
@@ -319,21 +318,21 @@ class InvoiceDetailWindow(tk.Toplevel):
             self.allocation_amounts[item_id] = amount_excluded
             self.allocation_rates[item_id] = tax_rate
             self.allocation_gross[item_id] = stored_amount
-            allocated += stored_amount
+            allocated += amount_excluded
         first_item = next(iter(self.allocations.get_children()), None)
         if first_item:
             self.allocations.selection_set(first_item)
             self.allocations.focus(first_item)
-        invoice_total = self.invoice_total
+        invoice_total = self.invoice_total_excluded
         remaining = invoice_total - allocated
         if remaining < 0:
             self.allocation_summary_var.set(
-                f"請求金額(税込): {invoice_total:,}円 / 振分合計(税込): {allocated:,}円 / 超過額: {abs(remaining):,}円"
+                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 超過額(税抜): {abs(remaining):,}円"
             )
             self.allocation_summary_var.set(self.allocation_summary_var.get() + "  ※超過しています")
         else:
             self.allocation_summary_var.set(
-                f"請求金額(税込): {invoice_total:,}円 / 振分合計(税込): {allocated:,}円 / 未振分額: {remaining:,}円"
+                f"請求金額(税抜): {invoice_total:,}円 / 振分合計(税抜): {allocated:,}円 / 未振分額(税抜): {remaining:,}円"
             )
         self.update_mark_selection_status()
 
@@ -349,7 +348,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             basis = "税込" if self.amount_display_mode == "税込" else "税抜・10%換算"
             self.total_amount_label.configure(text=f"請求金額({basis}):")
         if hasattr(self, "allocations"):
-            self.allocations.heading("amount", text=f"振分金額({self.amount_display_mode})")
+            self.allocations.heading("amount", text="振分金額(税抜)")
 
     def set_amount_display_mode(self, mode: str) -> None:
         self.amount_display_mode = mode
