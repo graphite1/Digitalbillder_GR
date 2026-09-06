@@ -8,6 +8,9 @@ from tkinter import ttk
 from invoice_manager.services.web_allocation_guard import WebWriteGuard
 from invoice_manager.services.web_allocation_plan import build_allocation_plan, compare_allocations
 from invoice_manager.services.web_invoice_reader import read_for_plan
+from invoice_manager.services.operation_cancellation import (
+    CancellationToken, OperationCancelled, cancellation_scope, check_cancelled,
+)
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS
 from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 
@@ -23,7 +26,7 @@ class WebAllocationPreviewWindow(tk.Toplevel):
         self.messages = queue.Queue()
         self.busy = False
         self.poll_id = None
-        self.activity = BackgroundActivity(self, "Webの現在値を確認")
+        self.activity = BackgroundActivity(self, f"Web現在値：{self.plan.vendor_name} / {self.plan.invoice_date} / 請求ID {invoice_id}")
         self.protocol("WM_DELETE_WINDOW", self.close)
         frame = ttk.Frame(self, padding=14)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -68,17 +71,26 @@ class WebAllocationPreviewWindow(tk.Toplevel):
         if changed:
             self.activity.finish("振分が変更されています。この画面を閉じて、プレビューを開き直してください。", failed=True)
             return
-        self.activity.start("対象請求書のWeb現在値を確認中… 他の画面も操作できます。")
+        token = self.cancellation = CancellationToken()
+        self.activity.start("対象請求書のWeb現在値を確認中… 他の画面も操作できます。", cancellation=token)
         self.busy = True
         self.read_button.configure(state=tk.DISABLED)
         self.diff_tree.delete(*self.diff_tree.get_children())
 
+        def progress(message):
+            check_cancelled()
+            self.messages.put(("progress", message))
+
         def worker():
             try:
-                result = read_for_plan(self.plan, lambda message: self.messages.put(("progress", message)))
+                with cancellation_scope(token):
+                    result = read_for_plan(self.plan, progress)
+                    check_cancelled()
                 self.messages.put(("result", result))
+            except OperationCancelled as exc:
+                self.messages.put(("cancelled", str(exc)))
             except Exception as exc:
-                self.messages.put(("error", str(exc)))
+                self.messages.put(("cancelled", str(OperationCancelled())) if token.requested else ("error", str(exc)))
 
         try:
             threading.Thread(target=worker, name="web-allocation-read", daemon=False).start()
@@ -91,11 +103,19 @@ class WebAllocationPreviewWindow(tk.Toplevel):
         while not self.messages.empty():
             kind, value = self.messages.get_nowait()
             if kind == "progress":
+                if self.cancellation.requested:
+                    self.progress.set("中断を待っています。現在の通信が終了するまでお待ちください。")
+                    continue
                 self.progress.set(value)
                 self.activity.update(str(value))
                 continue
             self.busy = False
             self.read_button.configure(state=tk.NORMAL)
+            if kind == "cancelled" or (kind == "result" and self.cancellation.requested):
+                value = str(OperationCancelled())
+                self.progress.set(str(value))
+                self.activity.finish(str(value), cancelled=True)
+                continue
             try:
                 if kind == "error":
                     raise RuntimeError(str(value))

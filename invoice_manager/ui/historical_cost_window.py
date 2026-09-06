@@ -19,6 +19,9 @@ from invoice_manager.services.historical_costs import (
 )
 from invoice_manager.utils.money_utils import format_amount
 from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
+from invoice_manager.services.operation_cancellation import (
+    CancellationToken, OperationCancelled, cancellation_scope, check_cancelled,
+)
 
 
 ALL_LABEL = "すべて"
@@ -292,10 +295,12 @@ class HistoricalCostWindow(tk.Toplevel):
             self.refresh_button.configure(state=tk.DISABLED)
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.DISABLED)
-        self.activity.start("保管済み履歴を全件再検証中…" if full else "保管済み履歴の追加・変更分を確認中…")
+        token = self.cancellation = CancellationToken()
+        self.activity.start("保管済み履歴を全件再検証中…" if full else "保管済み履歴の追加・変更分を確認中…", cancellation=token)
         events = self.events
 
         def progress(message: str) -> None:
+            check_cancelled()
             events.put(("progress", str(message)))
 
         def worker() -> None:
@@ -306,9 +311,12 @@ class HistoricalCostWindow(tk.Toplevel):
                     accepts_progress = bool(inspect.signature(callback).parameters)
                 except (TypeError, ValueError):
                     accepts_progress = False
-                result = callback(progress) if accepts_progress else callback()
+                with cancellation_scope(token):
+                    result = callback(progress) if accepts_progress else callback()
+            except OperationCancelled as exc:
+                events.put(("cancelled", str(exc)))
             except Exception as exc:
-                events.put(("error", exc))
+                events.put(("cancelled", str(OperationCancelled())) if token.requested else ("error", exc))
             else:
                 events.put(("done", result))
 
@@ -325,6 +333,13 @@ class HistoricalCostWindow(tk.Toplevel):
                 kind, value = self.events.get_nowait()
                 if kind == "progress":
                     self.activity.update(str(value))
+                elif kind == "cancelled":
+                    self.busy = False
+                    if self.refresh_button is not None:
+                        self.refresh_button.configure(state=tk.NORMAL)
+                    if self.full_refresh_button is not None:
+                        self.full_refresh_button.configure(state=tk.NORMAL)
+                    self.activity.finish(str(value), cancelled=True)
                 elif kind == "done":
                     self.busy = False
                     try:

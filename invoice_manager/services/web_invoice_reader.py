@@ -11,8 +11,9 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from invoice_manager.services.csv_reader import read_invoice_csv
-from invoice_manager.services.digital_billder_download import DownloadError, authenticated_reader_session, download_csv, export_session
+from invoice_manager.services.digital_billder_download import DownloadError, authenticated_reader_session, download_csv, export_session, wait_for_network_idle
 from invoice_manager.services.web_allocation_plan import AllocationLine, AllocationPlan
+from invoice_manager.services.operation_cancellation import check_cancelled, current_token, cancellation_scope, begin_commit
 
 ORIGIN = "https://purchases.digitalbillder.com"
 ASSESSMENT_REGION = "査定入力テーブル - パンしてスクロール可能"
@@ -48,6 +49,7 @@ def parse_assessment_rows(headers, rows) -> tuple[AllocationLine, ...]:
         raise InvoiceReadError("査定入力の列構成が変わっています。取得を停止しました。")
     lines = []
     for cells in rows:
+        check_cancelled()
         if len(cells) != len(headers):
             raise InvoiceReadError("査定入力のセル数が一致しません。")
         match = re.fullmatch(r"([^\s()]+)\s*\((.+)\)", cells[0].strip(), flags=re.DOTALL)
@@ -71,24 +73,31 @@ def parse_assessment_rows(headers, rows) -> tuple[AllocationLine, ...]:
 
 def read_invoice_page(page, external_id: str) -> WebInvoiceRead:
     """Navigate to one validated ID and inspect the rendered read-only tables."""
+    check_cancelled()
     UUID(external_id)
     page.goto(f"{ORIGIN}/invoices/{external_id}", wait_until="domcontentloaded")
+    check_cancelled()
     panel = page.get_by_role("tabpanel", name="請求書情報", exact=True)
     region = panel.get_by_role("region", name=ASSESSMENT_REGION, exact=True)
     region.wait_for(state="visible")
-    page.wait_for_load_state("networkidle", timeout=30_000)
+    check_cancelled()
+    wait_for_network_idle(page)
     parsed = urlparse(page.url)
     if f"{parsed.scheme}://{parsed.netloc}" != ORIGIN or parsed.path != f"/invoices/{external_id}":
         raise InvoiceReadError("別の請求ページへ移動したため取得を停止しました。")
     headers = region.get_by_role("columnheader").all_text_contents()
+    check_cancelled()
     rows = region.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
+    check_cancelled()
     lines = parse_assessment_rows([s.strip() for s in headers], rows)
     project_table = panel.get_by_role("table").filter(has=page.get_by_role("columnheader", name="工事コード", exact=True))
     project_rows = project_table.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
+    check_cancelled()
     if len(project_rows) != 1 or len(project_rows[0]) != 5:
         raise InvoiceReadError("工事情報の構成を確認できません。")
     item_table = panel.get_by_role("table").filter(has=page.get_by_role("columnheader", name="項目", exact=True))
     pairs = item_table.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
+    check_cancelled()
     # The current read-only table has a third, empty operation cell omitted by AX.
     if any(len(pair) != 3 or pair[2] for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
         raise InvoiceReadError("請求書項目の構成を確認できません。")
@@ -105,8 +114,9 @@ def read_invoice_page(page, external_id: str) -> WebInvoiceRead:
         raise InvoiceReadError("本人確認用の請求書項目が見つかりません。") from None
     if sum(line.amount_included for line in lines) != assessed_total:
         raise InvoiceReadError("査定合計と読み取った明細の税込合計が一致しません。")
-    return WebInvoiceRead(external_id, project_rows[0][1], vendor, date, total,
-                          panel.get_by_text("保管済みのため編集できません", exact=True).count() > 0, lines)
+    archived = panel.get_by_text("保管済みのため編集できません", exact=True).count() > 0
+    check_cancelled()
+    return WebInvoiceRead(external_id, project_rows[0][1], vendor, date, total, archived, lines)
 
 
 def verify_identity(read: WebInvoiceRead, *, external_id, project_code, vendor_name, invoice_date, invoice_amount) -> None:
@@ -117,11 +127,13 @@ def verify_identity(read: WebInvoiceRead, *, external_id, project_code, vendor_n
 
 
 def read_for_plan(plan: AllocationPlan, progress=lambda _message: None) -> WebInvoiceRead:
+    check_cancelled()
     with export_session(progress) as page:
         progress("Webの査定入力を読み取っています…")
         result = read_invoice_page(page, plan.external_id)
     verify_identity(result, external_id=plan.external_id, project_code=plan.project_code,
                     vendor_name=plan.vendor_name, invoice_date=plan.invoice_date, invoice_amount=plan.invoice_amount)
+    check_cancelled()
     return result
 
 
@@ -134,6 +146,10 @@ def _cached_snapshot_matches(snapshot, row) -> bool:
 
 def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]:
     """Up to three independent reader threads; Playwright objects never cross threads."""
+    check_cancelled()
+    if not rows:
+        return []
+    token = current_token()
     count = min(3, len(rows))
     batches = [rows[index::count] for index in range(count)]
     completed = 0
@@ -142,9 +158,11 @@ def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]
     def read_batch(batch):
         nonlocal completed
         results = []
-        with authenticated_reader_session(storage_state) as page:
+        with cancellation_scope(token), authenticated_reader_session(storage_state) as page:
             for row in batch:
+                check_cancelled()
                 result = read_invoice_page(page, row.external_id)
+                check_cancelled()
                 results.append(result)
                 with progress_lock:
                     completed += 1
@@ -155,7 +173,9 @@ def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]
     with ThreadPoolExecutor(max_workers=count, thread_name_prefix="billder-read") as executor:
         futures = [executor.submit(read_batch, batch) for batch in batches]
         for future in as_completed(futures):
+            check_cancelled()
             results.extend(future.result())
+    check_cancelled()
     return results
 
 
@@ -165,6 +185,7 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
         replace_active_archived_snapshots,
     )
 
+    check_cancelled()
     if not _sync_lock.acquire(blocking=False):
         raise InvoiceReadError("保管済み履歴の取得を実行中です。")
     try:
@@ -176,11 +197,13 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
         with tempfile.TemporaryDirectory(prefix="digitalbillder_history_") as folder:
             with export_session(progress, archived_only=True) as page:
                 path = download_csv(page, Path(folder) / "archived.csv")
+                check_cancelled()
                 rows, errors, _encoding = read_invoice_csv(path) if path else ([], [], None)
                 if errors or len({row.external_id for row in rows}) != len(rows):
                     raise InvoiceReadError("保管済み一覧の重複または読取りエラーがあります。")
                 pending = []
                 for row in rows:
+                    check_cancelled()
                     prior = cached.get(row.external_id)
                     if _cached_snapshot_matches(prior, row):
                         snapshots.append(prior)
@@ -192,12 +215,14 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                     read_results.append(read_invoice_page(page, pending[0].external_id))
                 # Authentication state stays in process memory, never in files or logs.
                 session_state = page.context.storage_state() if len(pending) > 1 else None
+                check_cancelled()
             if len(pending) > 1:
                 read_results = _read_archive_batches(pending, session_state, progress)
             by_id = {result.external_id: result for result in read_results}
             if len(read_results) != len(pending) or len(by_id) != len(pending) or set(by_id) != {row.external_id for row in pending}:
                 raise InvoiceReadError("取得した請求ID・件数が一致しません。履歴は更新していません。")
             for row in pending:
+                check_cancelled()
                 result = by_id[row.external_id]
                 verify_identity(result, external_id=row.external_id, project_code=row.project_code,
                                 vendor_name=row.vendor_name, invoice_date=row.invoice_date, invoice_amount=row.total_amount)
@@ -214,11 +239,14 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                         for line in result.lines),
                 ))
         # One complete scan replaces availability atomically; failed scans publish nothing.
+        begin_commit()
         replace_active_archived_snapshots(snapshots)
         return f"保管済み{len(rows)}件を確認。詳細取得{len(pending)}件 / 確認済み再利用{reused}件 / 今回取得分の査定なし{len(empty_ids)}件。\n保存済み査定だけが修正された場合は「全件を再検証」で反映してください。"
     except InvoiceReadError:
+        check_cancelled()
         raise
     except (ValueError, AssertionError):
+        check_cancelled()
         raise InvoiceReadError("保管済み履歴の内容を確認できません。履歴は更新していません。") from None
     finally:
         _sync_lock.release()

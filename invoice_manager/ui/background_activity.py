@@ -10,6 +10,8 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+from invoice_manager.services.operation_cancellation import CancellationToken
+
 
 _REGISTRY_ATTRIBUTE = "_background_activity_registry"
 _COMPLETED_LIMIT = 20
@@ -41,25 +43,38 @@ class BackgroundActivity:
         self.running = False
         self.message = "待機中"
         self.failed = False
+        self.cancelled = False
+        self.cancellation: CancellationToken | None = None
         self.started_at: float | None = None
         self.finished_at: float | None = None
 
-    def start(self, message: str) -> None:
+    def start(self, message: str, *, cancellation: CancellationToken | None = None) -> None:
         self.running = True
         self.failed = False
+        self.cancelled = False
+        self.cancellation = cancellation
         self.message = message
         self.started_at = time.monotonic()
         self.finished_at = None
         _remember(self)
 
     def update(self, message: str) -> None:
-        if self.running:
+        if self.running and not self.cancel_requested:
             self.message = message
 
-    def finish(self, message: str, failed: bool = False) -> None:
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancellation is not None and self.cancellation.requested
+
+    def request_cancel(self) -> None:
+        if self.running and self.cancellation is not None and self.cancellation.request():
+            self.message = "中断を要求しました。実行中の通信の終了・後片付けを待っています。"
+
+    def finish(self, message: str, failed: bool = False, *, cancelled: bool = False) -> None:
         self.running = False
         self.message = message
         self.failed = failed
+        self.cancelled = cancelled
         self.finished_at = time.monotonic()
         _remember(self)
 
@@ -101,18 +116,20 @@ class ActivityPanel(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self.selector = ttk.Combobox(self, state="readonly")
-        self.selector.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 3))
+        self.selector.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 3))
         self.selector.bind("<<ComboboxSelected>>", self._select_activity)
         self.status_label = ttk.Label(self, text="待機中")
         self.status_label.grid(row=1, column=0, sticky="w")
         self.elapsed_label = ttk.Label(self)
-        self.elapsed_label.grid(row=1, column=1, sticky="e", padx=(8, 0))
+        self.elapsed_label.grid(row=1, column=1, columnspan=2, sticky="e", padx=(8, 0))
         self.message_label = ttk.Label(self, wraplength=640, justify="left")
-        self.message_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=3)
+        self.message_label.grid(row=2, column=0, columnspan=3, sticky="ew", pady=3)
         self.progress = ttk.Progressbar(self, mode="indeterminate", length=180)
         self.progress.grid(row=3, column=0, sticky="ew", padx=(0, 8))
         self.open_button = ttk.Button(self, text="処理画面へ戻る", command=self._show_owner)
         self.open_button.grid(row=3, column=1, sticky="e")
+        self.cancel_button = ttk.Button(self, text="中断", command=self._cancel_selected)
+        self.cancel_button.grid(row=3, column=2, sticky="e", padx=(6, 0))
         self.bind("<Configure>", self._on_resize, add="+")
         self.bind("<Destroy>", self._on_destroy, add="+")
         self._tick()
@@ -122,6 +139,19 @@ class ActivityPanel(ttk.Frame):
         if 0 <= index < len(self._choices):
             self._selected = self._choices[index]
             self._render()
+
+    def _cancel_selected(self) -> None:
+        if self._selected is not None:
+            self._selected.request_cancel()
+            self._render()
+
+    @staticmethod
+    def _state(item: BackgroundActivity) -> str:
+        if item.running:
+            return "中断待ち" if item.cancel_requested else "実行中"
+        if item.cancelled:
+            return "中断済み"
+        return "失敗" if item.failed else "完了" if item.finished_at is not None else "待機中"
 
     def _show_owner(self) -> None:
         if self._selected is None:
@@ -181,7 +211,7 @@ class ActivityPanel(ttk.Frame):
             ):
                 self._selected = self._choices[0] if self._choices else None
             self.selector.configure(values=[
-                f"{'実行中' if item.running else '失敗' if item.failed else '完了'}：{item.title}"
+                f"{self._state(item)}：{item.title}"
                 for item in self._choices
             ])
             if len(self._choices) > 1:
@@ -200,7 +230,7 @@ class ActivityPanel(ttk.Frame):
             self.message_label.configure(text="", foreground="")
             self.elapsed_label.configure(text="")
         else:
-            state = "実行中" if running else "失敗" if failed else "完了" if item.finished_at is not None else "待機中"
+            state = self._state(item)
             self.status_label.configure(
                 text=f"{state}：{item.title}", foreground="#b00020" if failed else ""
             )
@@ -215,6 +245,12 @@ class ActivityPanel(ttk.Frame):
             except tk.TclError:
                 pass
         self.open_button.configure(state="normal" if owner_exists else "disabled")
+        cancellable = running and item.cancellation is not None and item.cancellation.can_cancel
+        saving = running and item.cancellation is not None and not item.cancellation.can_cancel and not item.cancel_requested
+        self.cancel_button.configure(
+            state="normal" if cancellable else "disabled",
+            text="中断待ち" if running and item.cancel_requested else "保存中" if saving else "中断",
+        )
         if running:
             self.progress.grid()
             # Use our cancellable refresh timer rather than ttk's separate Tcl

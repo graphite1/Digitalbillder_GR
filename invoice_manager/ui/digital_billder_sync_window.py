@@ -7,6 +7,9 @@ from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import get_app_setting
 from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
+from invoice_manager.services.operation_cancellation import (
+    CancellationToken, OperationCancelled, cancellation_scope, check_cancelled,
+)
 from invoice_manager.services.digital_billder_credentials import (
     ACCOUNT_KEY,
     CredentialDependencyError,
@@ -108,14 +111,22 @@ class DigitalBillderSyncWindow(tk.Toplevel):
         self.busy = True
         self.update_buttons()
         self.status.set(message)
-        self.activity.start(message)
+        token = self.cancellation = CancellationToken()
+        self.activity.start(message, cancellation=token)
+
+        def progress(text):
+            check_cancelled()
+            self.events.put(("progress", text))
 
         def work():
             try:
-                result = function(lambda text: self.events.put(("progress", text)))
+                with cancellation_scope(token):
+                    result = function(progress)
                 self.events.put(("done", result))
+            except OperationCancelled as exc:
+                self.events.put(("cancelled", str(exc)))
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                self.events.put(("cancelled", str(OperationCancelled())) if token.requested else ("error", str(exc)))
 
         try:
             threading.Thread(target=work, daemon=False).start()
@@ -133,10 +144,18 @@ class DigitalBillderSyncWindow(tk.Toplevel):
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == "progress":
+                    if self.cancellation.requested:
+                        self.status.set("中断を待っています。現在の通信が終了するまでお待ちください。")
+                        continue
                     self.status.set(value)
                     self.activity.update(value)
                     continue
                 self.busy = False
+                if kind == "cancelled":
+                    self.status.set(str(value))
+                    self.activity.finish(str(value), cancelled=True)
+                    self.update_buttons()
+                    continue
                 self.activity.finish(str(value), failed=kind == "error")
                 try:
                     self.refresh()

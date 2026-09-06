@@ -14,6 +14,7 @@ from invoice_manager.models import InvoiceCsvRow
 from invoice_manager.services.csv_reader import REQUIRED_COLUMNS, read_invoice_csv
 from invoice_manager.services.digital_billder_download import download_csv, download_zip, export_session
 from invoice_manager.services.import_service import execute_import, preview_import
+from invoice_manager.services.operation_cancellation import check_cancelled, begin_commit
 
 SYNC_LOCK = Lock()
 
@@ -44,6 +45,7 @@ def validate_rows(path: Path) -> list[InvoiceCsvRow]:
 
 
 def remember_candidates(rows: list[InvoiceCsvRow]) -> None:
+    begin_commit()
     initialize_sync()
     now = datetime.now().isoformat(timespec="seconds")
     with db.get_connection() as conn:
@@ -96,6 +98,7 @@ def write_selected_csv(path: Path, rows: list[InvoiceCsvRow]) -> None:
 
 
 def fetch_candidates(progress=lambda text: None) -> int:
+    check_cancelled()
     if not SYNC_LOCK.acquire(blocking=False):
         raise ValueError("別の自動取得を実行中です。")
     try:
@@ -104,7 +107,9 @@ def fetch_candidates(progress=lambda text: None) -> int:
             with export_session(progress) as page:
                 progress("CSVを取得しています…")
                 path = download_csv(page, Path(folder) / "invoices.csv")
+                check_cancelled()
                 rows = validate_rows(path) if path else []
+            begin_commit()
             remember_candidates(rows)
             return len(list_candidates())
     finally:
@@ -112,6 +117,7 @@ def fetch_candidates(progress=lambda text: None) -> int:
 
 
 def import_selected(ids: set[str], progress=lambda text: None):
+    check_cancelled()
     if not ids:
         raise ValueError("取り込む請求を選択してください。")
     if not SYNC_LOCK.acquire(blocking=False):
@@ -122,25 +128,30 @@ def import_selected(ids: set[str], progress=lambda text: None):
             with export_session(progress) as page:
                 progress("選択した請求が現在も有効か確認しています…")
                 csv_path = download_csv(page, folder / "current.csv")
+                check_cancelled()
                 current = validate_rows(csv_path) if csv_path else []
                 current_by_id = {row.external_id: row for row in current}
                 pending_by_id = {row.external_id: row for row in list_candidates()}
                 if not ids <= current_by_id.keys() or not ids <= pending_by_id.keys():
                     raise ValueError("選択した請求に破棄済み・対象外・処理済みが含まれます。新着確認をやり直してください。")
                 for invoice_id in ids:
+                    check_cancelled()
                     if current_by_id[invoice_id].raw_data != pending_by_id[invoice_id].raw_data:
                         raise ValueError("確認後に請求内容が変わりました。新着確認をやり直してください。")
                 progress("請求書のZIPを取得しています…")
                 zip_path = download_zip(page, folder / "invoices.zip")
+                check_cancelled()
             selected_csv = folder / "selected.csv"
             write_selected_csv(selected_csv, [current_by_id[i] for i in sorted(ids)])
             preview = preview_import(selected_csv, zip_path, "")
+            check_cancelled()
             missing_pdf = ids - set(preview.zip_index.pdf_by_id)
             if preview.errors or missing_pdf:
                 raise ValueError("選択した請求のCSV・PDFが揃っていません。未確認のまま残します。")
             if preview.new_count != len(ids):
                 raise ValueError("選択した請求に重複候補・アーカイブ工事があります。手動取込で内容を確認してください。")
             progress("選択した請求を台帳に登録しています…")
+            begin_commit()
             with db.atomic_transaction():
                 result = execute_import(selected_csv, zip_path, "", "Digital Billder新着取込", prepared_preview=preview)
                 with db.get_connection() as conn:
