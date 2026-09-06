@@ -34,7 +34,8 @@ from invoice_manager.utils.date_utils import format_billing_month
 from invoice_manager.utils.file_safety import validate_original_pdf_path
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS, format_amount, tax_excluded_amount, tax_included_amount
 from invoice_manager.services.allocation_work_types import save_resolved_allocation
-from invoice_manager.services.work_type_resolution import load_confirmed_work_types, resolve_from_catalog, WorkTypeResolutionError
+from invoice_manager.ui.background_activity import has_running_descendants
+from invoice_manager.services.work_type_resolution import load_work_type_choices, resolve_from_catalog, WorkTypeResolutionError
 
 
 class InvoiceDetailWindow(tk.Toplevel):
@@ -95,6 +96,13 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.bind("<Delete>", self.delete_selected_pdf_mark_shortcut)
         self.bind("<Control-z>", self.undo_last_pdf_mark)
         self.load()
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+
+    def close_window(self) -> None:
+        if has_running_descendants(self):
+            self.withdraw()
+        else:
+            self.destroy()
 
     def _build(self) -> None:
         top_area = tk.Frame(self, padx=10, pady=8)
@@ -189,11 +197,14 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.allocations.bind("<<TreeviewSelect>>", self.on_allocation_selected)
         buttons = tk.Frame(allocation_frame)
         buttons.pack(fill=tk.X)
-        tk.Button(buttons, text="振分行を追加", command=self.add_allocation).pack(side=tk.LEFT, padx=4)
-        tk.Button(buttons, text="振分行を編集", command=self.edit_allocation).pack(side=tk.LEFT, padx=4)
-        tk.Button(buttons, text="振分行を削除", command=self.delete_allocation).pack(side=tk.LEFT, padx=4)
-        tk.Button(buttons, text="Web転記プレビュー", command=self.open_transfer_preview).pack(side=tk.LEFT, padx=4)
-        tk.Button(buttons, text="履歴候補", command=self.open_history_suggestions).pack(side=tk.LEFT, padx=4)
+        for index, (label, command) in enumerate((
+            ("振分行を追加", self.add_allocation), ("振分行を編集", self.edit_allocation),
+            ("振分行を削除", self.delete_allocation), ("Web転記プレビュー", self.open_transfer_preview),
+            ("履歴候補", self.open_history_suggestions), ("税額の端数差を調整", self.adjust_tax_rounding),
+        )):
+            buttons.columnconfigure(index % 3, weight=1)
+            tk.Button(buttons, text=label, command=command).grid(row=index // 3, column=index % 3,
+                                                               sticky=tk.EW, padx=3, pady=2)
 
         files_frame = tk.LabelFrame(side_panel, text="添付ファイル", padx=8, pady=8)
         files_frame.grid(row=0, column=1, sticky=tk.NSEW)
@@ -293,7 +304,7 @@ class InvoiceDetailWindow(tk.Toplevel):
                     row["code"],
                 )
             )
-        self.confirmed_work_types = load_confirmed_work_types(self.project_id)
+        self.confirmed_work_types = load_work_type_choices(self.project_id)
         disabled_codes = {row["code"] for row in list_work_type_codes(self.project_id) if not row["is_active"]}
         for code in tuple(disabled_codes):
             try:
@@ -490,6 +501,38 @@ class InvoiceDetailWindow(tk.Toplevel):
     def add_allocation(self) -> None:
         self.open_allocation_dialog()
 
+    def adjust_tax_rounding(self) -> None:
+        from invoice_manager.services.allocation_rounding import preview_rounding_adjustment, apply_rounding_adjustment
+        selection = self.allocations.selection()
+        if not selection:
+            messagebox.showinfo("行を選択", "税額を調整する振分行を選択してください。", parent=self)
+            return
+        allocation_id = self.allocation_ids[selection[0]]
+        try:
+            preview = preview_rounding_adjustment(self.invoice_id, allocation_id)
+        except Exception as exc:
+            messagebox.showerror("端数調整", str(exc), parent=self)
+            return
+        if not messagebox.askyesno(
+            "税額の端数差を調整",
+            f"{preview.code}｜{preview.name}\n\n"
+            f"税抜金額: {preview.net_amount:,}円（変更しません）\n"
+            f"消費税額: {preview.tax_before:,}円 → {preview.tax_after:,}円\n"
+            f"税込金額: {preview.gross_before:,}円 → {preview.gross_after:,}円\n\n"
+            f"請求書との差額 {preview.difference:+,}円をこの行の税額で調整します。\n"
+            "請求書原本の税額を確認したうえで適用しますか？",
+            parent=self,
+        ):
+            return
+        try:
+            apply_rounding_adjustment(self.invoice_id, allocation_id, preview)
+        except Exception as exc:
+            messagebox.showerror("端数調整", str(exc), parent=self)
+            return
+        self.load_allocations()
+        if self.on_saved:
+            self.on_saved()
+
     def edit_allocation(self) -> None:
         selection = self.allocations.selection()
         if not selection:
@@ -503,6 +546,11 @@ class InvoiceDetailWindow(tk.Toplevel):
     def open_transfer_preview(self) -> None:
         from invoice_manager.ui.web_allocation_preview_window import WebAllocationPreviewWindow
 
+        for child in self.winfo_children():
+            if isinstance(child, WebAllocationPreviewWindow) and child.invoice_id == self.invoice_id:
+                child.deiconify()
+                child.lift()
+                return
         WebAllocationPreviewWindow(self, self.invoice_id)
 
     def get_history_suggestions(self):
@@ -621,7 +669,8 @@ class InvoiceDetailWindow(tk.Toplevel):
         def update_work_type_preview(*_args) -> None:
             try:
                 item = resolve_from_catalog(selected_code(), self.confirmed_work_types)
-                resolved_work_type.set(f"実績側の正式コード: {item.code}｜{item.name}")
+                basis = "実績で確認済み" if item.confirmed else "D＋3桁の基本ルール（実績未確認）"
+                resolved_work_type.set(f"{basis}: {item.code}｜{item.name}")
             except WorkTypeResolutionError as exc:
                 resolved_work_type.set(str(exc) if selected_work_type.get() else "3桁の数字を入力するか、工種を選択してください。")
 

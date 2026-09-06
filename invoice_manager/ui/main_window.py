@@ -7,12 +7,33 @@ from urllib.parse import urlparse
 
 from invoice_manager.repositories import get_app_setting, list_billing_months, set_app_setting
 from invoice_manager.utils.date_utils import format_billing_month, validate_billing_month
+from invoice_manager.ui.background_activity import has_running_descendants, running_activities
 
 
 DEFAULT_DIGITAL_BILLDER_URL = "https://purchases.digitalbillder.com/invoices/applications"
 
 
 UPDATE_RESTART_EXIT_CODE = 75
+
+
+def open_management_hub(parent):
+    existing = getattr(parent, "_management_hub", None)
+    if existing is not None and existing.winfo_exists():
+        existing.deiconify()
+        existing.lift()
+        return existing
+    dialog = tk.Toplevel(parent)
+    parent._management_hub = dialog
+    MainWindow(dialog)
+    dialog.transient(parent)
+    return dialog
+
+
+def has_busy_update(widget) -> bool:
+    from invoice_manager.ui.update_window import UpdateWindow
+    if isinstance(widget, UpdateWindow) and widget.is_busy:
+        return True
+    return any(has_busy_update(child) for child in widget.winfo_children())
 
 
 def run_app() -> int:
@@ -27,14 +48,7 @@ def run_app() -> int:
     root.withdraw()
     root.update_restart_requested = False
 
-    def open_hub(parent) -> None:
-        dialog = tk.Toplevel(parent)
-        MainWindow(dialog)
-        dialog.transient(parent)
-        dialog.grab_set()
-        dialog.wait_window()
-
-    InvoiceListWindow(root, on_close=root.destroy, open_hub=open_hub)
+    InvoiceListWindow(root, on_close=root.destroy, open_hub=open_management_hub)
     root.mainloop()
     return UPDATE_RESTART_EXIT_CODE if root.update_restart_requested else 0
 
@@ -103,17 +117,29 @@ class MainWindow:
     def close_window(self) -> None:
         from invoice_manager.ui.update_window import UpdateWindow
 
+        if has_running_descendants(self.root):
+            self.root.withdraw()
+            return
+
         if any(
             isinstance(child, UpdateWindow) and child.winfo_exists() and child.is_busy
             for child in self.root.winfo_children()
         ):
             messagebox.showinfo("更新処理中", "更新の確認またはダウンロードが完了してから閉じてください。", parent=self.root)
             return
+        parent = self.root.master
         self.root.destroy()
+        if callable(getattr(parent, "reload_filter_options", None)):
+            parent.reload_filter_options()
 
     def open_digital_billder_sync(self) -> None:
         from invoice_manager.ui.digital_billder_sync_window import DigitalBillderSyncWindow
 
+        for child in self.root.winfo_children():
+            if isinstance(child, DigitalBillderSyncWindow):
+                child.deiconify()
+                child.lift()
+                return
         DigitalBillderSyncWindow(self.root)
 
     def open_import(self) -> None:
@@ -126,6 +152,11 @@ class MainWindow:
         from invoice_manager.services.web_invoice_reader import sync_archived_history
         from invoice_manager.ui.historical_cost_window import HistoricalCostWindow
 
+        for child in self.root.winfo_children():
+            if isinstance(child, HistoricalCostWindow):
+                child.deiconify()
+                child.lift()
+                return
         HistoricalCostWindow(self.root, on_refresh_history=sync_archived_history,
                              on_full_refresh_history=partial(sync_archived_history, full_refresh=True))
 
@@ -207,6 +238,9 @@ class MainWindow:
         return memo_var.get() != saved_memo
 
     def request_update_restart(self) -> None:
+        if running_activities(self.root):
+            messagebox.showinfo("処理中", "検索・取得・取込の完了後にアプリを再起動してください。", parent=self.root)
+            return
         app_root = self.root
         while app_root.master is not None:
             app_root = app_root.master

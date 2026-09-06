@@ -8,7 +8,7 @@ from uuid import UUID
 
 from invoice_manager.repositories import get_invoice_detail, list_invoice_allocations, list_work_type_codes
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS, tax_included_amount
-from invoice_manager.services.work_type_resolution import load_confirmed_work_types, resolve_from_catalog, WorkTypeResolutionError
+from invoice_manager.services.work_type_resolution import load_work_type_choices, resolve_from_catalog, WorkTypeResolutionError
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ def build_allocation_plan(invoice_id: int) -> AllocationPlan:
         errors.append("Webの請求書IDとして確認できない形式です。")
     masters = list_work_type_codes(int(invoice["project_id"]))
     active_codes = {int(row["id"]) for row in masters if row["is_active"]}
-    canonical_codes = load_confirmed_work_types(int(invoice["project_id"]))
+    canonical_codes = load_work_type_choices(int(invoice["project_id"]))
     disabled_codes = set()
     for master in masters:
         if not master["is_active"]:
@@ -80,7 +80,12 @@ def build_allocation_plan(invoice_id: int) -> AllocationPlan:
             errors.append("この工事で有効でない工種コードがあります。")
         if amount <= 0:
             errors.append("税抜金額が0円以下の振分行があります。")
-        if rate in TAX_RATE_LABELS and tax_included_amount(amount, rate) != included:
+        adjustment = row["tax_rounding_adjustment"]
+        adjustment_valid = (type(adjustment) is int and adjustment in (-1, 0, 1)
+                            and (rate != "exempt" or adjustment == 0) and included >= amount)
+        if not adjustment_valid:
+            errors.append("保存済みの税額端数調整が不正です。")
+        if rate in TAX_RATE_LABELS and (not adjustment_valid or tax_included_amount(amount, rate) + adjustment != included):
             errors.append("保存済みの税込金額と税率計算に差があります。端数の扱いを確認してください。")
         code, name = row["code"], row["name"]
         try:

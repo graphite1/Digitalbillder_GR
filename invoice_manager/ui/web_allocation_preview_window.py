@@ -3,12 +3,13 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from invoice_manager.services.web_allocation_guard import WebWriteGuard
 from invoice_manager.services.web_allocation_plan import build_allocation_plan, compare_allocations
 from invoice_manager.services.web_invoice_reader import read_for_plan
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS
+from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 
 
 class WebAllocationPreviewWindow(tk.Toplevel):
@@ -22,9 +23,11 @@ class WebAllocationPreviewWindow(tk.Toplevel):
         self.messages = queue.Queue()
         self.busy = False
         self.poll_id = None
+        self.activity = BackgroundActivity(self, "Webの現在値を確認")
         self.protocol("WM_DELETE_WINDOW", self.close)
         frame = ttk.Frame(self, padding=14)
         frame.pack(fill=tk.BOTH, expand=True)
+        ActivityPanel(frame, activity=self.activity).pack(fill=tk.X, pady=(0, 8))
         ttk.Label(frame, text=f"{self.plan.project_code}  /  {self.plan.vendor_name}  /  {self.plan.invoice_date}", font=("", 12, "bold")).pack(anchor=tk.W)
         ttk.Label(frame, text="転記の到達点は「編集を保存」です。「アクション → 次に回す」はユーザーが操作します。").pack(anchor=tk.W, pady=6)
         guard = WebWriteGuard().status()
@@ -57,9 +60,15 @@ class WebAllocationPreviewWindow(tk.Toplevel):
     def read_current(self) -> None:
         if self.busy:
             return
-        if build_allocation_plan(self.invoice_id).fingerprint != self.plan.fingerprint:
-            messagebox.showwarning("振分が変更されています", "この画面を閉じて、プレビューを開き直してください。", parent=self)
+        try:
+            changed = build_allocation_plan(self.invoice_id).fingerprint != self.plan.fingerprint
+        except Exception as exc:
+            self.activity.finish(f"振分の確認に失敗しました: {exc}", failed=True)
             return
+        if changed:
+            self.activity.finish("振分が変更されています。この画面を閉じて、プレビューを開き直してください。", failed=True)
+            return
+        self.activity.start("対象請求書のWeb現在値を確認中… 他の画面も操作できます。")
         self.busy = True
         self.read_button.configure(state=tk.DISABLED)
         self.diff_tree.delete(*self.diff_tree.get_children())
@@ -71,7 +80,10 @@ class WebAllocationPreviewWindow(tk.Toplevel):
             except Exception as exc:
                 self.messages.put(("error", str(exc)))
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="web-allocation-read", daemon=False).start()
+        except Exception as exc:
+            self.messages.put(("error", str(exc)))
         self.poll_id = self.after(100, self.poll)
 
     def poll(self) -> None:
@@ -80,26 +92,32 @@ class WebAllocationPreviewWindow(tk.Toplevel):
             kind, value = self.messages.get_nowait()
             if kind == "progress":
                 self.progress.set(value)
+                self.activity.update(str(value))
                 continue
             self.busy = False
             self.read_button.configure(state=tk.NORMAL)
-            if kind == "error":
-                self.progress.set("現在値を確認できませんでした。Webへの変更はありません。")
-                messagebox.showerror("Web読取りエラー", value, parent=self)
-            elif build_allocation_plan(self.invoice_id).fingerprint != self.plan.fingerprint:
-                self.progress.set("読取り中にローカル振分が変わりました。この画面を閉じて再確認してください。")
-            else:
-                differences = compare_allocations(self.plan.lines, value.lines)
-                for diff in differences:
-                    self.diff_tree.insert("", tk.END, values=(diff.row_number, diff.field, diff.local, diff.web))
-                status = "保管済みのため編集できません。" if value.archived else "編集可否は実機検証待ちです。"
-                self.progress.set(f"差分 {len(differences)}項目。{status} 取得時点の値を表示しています。")
+            try:
+                if kind == "error":
+                    raise RuntimeError(str(value))
+                if build_allocation_plan(self.invoice_id).fingerprint != self.plan.fingerprint:
+                    self.progress.set("読取り中にローカル振分が変わりました。この画面を閉じて再確認してください。")
+                    self.activity.finish(self.progress.get(), failed=True)
+                else:
+                    differences = compare_allocations(self.plan.lines, value.lines)
+                    for diff in differences:
+                        self.diff_tree.insert("", tk.END, values=(diff.row_number, diff.field, diff.local, diff.web))
+                    status = "保管済みのため編集できません。" if value.archived else "編集可否は実機検証待ちです。"
+                    self.progress.set(f"差分 {len(differences)}項目。{status} 取得時点の値を表示しています。")
+                    self.activity.finish(self.progress.get())
+            except Exception as exc:
+                self.progress.set(f"現在値を確認できませんでした: {exc}。Webへの変更はありません。")
+                self.activity.finish(self.progress.get(), failed=True)
         if self.busy:
             self.poll_id = self.after(100, self.poll)
 
     def close(self) -> None:
         if self.busy:
-            messagebox.showinfo("取得中", "Webの読取り完了後に閉じてください。", parent=self)
+            self.withdraw()
             return
         if self.poll_id is not None:
             self.after_cancel(self.poll_id)

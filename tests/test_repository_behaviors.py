@@ -8,7 +8,7 @@ from unittest.mock import patch
 from invoice_manager import db, repositories
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.services import duplicate_checker
-from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG
+from invoice_manager.work_type_catalog import WORK_TYPE_CODE_CATALOG, WORK_TYPE_CODE_NAMES, WORK_TYPE_CODE_ORDERS
 
 
 def make_row(
@@ -84,13 +84,17 @@ class RepositoryBehaviorTests(unittest.TestCase):
 
         with db.get_connection() as conn:
             rows = conn.execute(
-                "SELECT updated_at FROM work_type_codes WHERE project_id = ?",
+                "SELECT code, updated_at FROM work_type_codes WHERE project_id = ?",
                 (project_id,),
             ).fetchall()
 
         self.assertEqual(inserted_first, len(WORK_TYPE_CODE_CATALOG))
         self.assertEqual(inserted_second, 0)
         self.assertEqual({row["updated_at"] for row in rows}, {timestamps[0]})
+        self.assertEqual({row["code"] for row in rows}, {code for code, _name in WORK_TYPE_CODE_CATALOG})
+        self.assertTrue(all(row["code"].startswith("D") for row in rows))
+        self.assertEqual(WORK_TYPE_CODE_NAMES["301"], WORK_TYPE_CODE_NAMES["D301"])
+        self.assertEqual(WORK_TYPE_CODE_ORDERS["301"], WORK_TYPE_CODE_ORDERS["D301"])
 
     def test_import_history_keeps_completion_snapshot(self) -> None:
         batch_id = repositories.create_import_batch(

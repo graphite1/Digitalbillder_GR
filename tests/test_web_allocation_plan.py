@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from invoice_manager import db, repositories
 from invoice_manager.models import InvoiceCsvRow
-from invoice_manager.services.work_type_resolution import CanonicalWorkType
+from invoice_manager.services.work_type_resolution import CanonicalWorkType, load_work_type_choices
 from invoice_manager.services.web_allocation_plan import (
     AllocationLine,
     build_allocation_plan,
@@ -39,7 +39,7 @@ def make_row(total_amount: int) -> InvoiceCsvRow:
 class WebAllocationPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         catalog_patch = patch(
-            "invoice_manager.services.web_allocation_plan.load_confirmed_work_types",
+            "invoice_manager.services.web_allocation_plan.load_work_type_choices",
             return_value=tuple(CanonicalWorkType(f"D{code}", f"実績名称{code}") for code in ("301", "302", "303")),
         )
         self.catalog = catalog_patch.start()
@@ -58,6 +58,9 @@ class WebAllocationPlanTests(unittest.TestCase):
         detail = repositories.get_invoice_detail(self.invoice_id)
         self.project_id = int(detail["project_id"])
         repositories.ensure_work_type_codes_for_project(self.project_id)
+        # Retain coverage for allocations made with the pre-D numeric template.
+        for code in ("301", "302", "303"):
+            repositories.save_work_type_code(self.project_id, code, f"旧名称{code}")
         self.code_ids = {
             row["code"]: int(row["id"])
             for row in repositories.list_work_type_codes(self.project_id, active_only=True)
@@ -97,16 +100,41 @@ class WebAllocationPlanTests(unittest.TestCase):
         self.assertEqual([line.code for line in plan.lines], ["D301", "D302", "D303"])
         self.assertEqual(plan.lines[0].name, "実績名称301")
 
-    def test_unknown_or_ambiguous_codes_block_plan_without_changing_allocations(self) -> None:
+    def test_ambiguous_codes_block_plan_without_changing_allocations(self) -> None:
         self.add_allocation(100, "10")
         self.set_invoice_total(110)
         before = [dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)]
-        for catalog in ((), (CanonicalWorkType("D301", "土木"), CanonicalWorkType("B301", "建築"))):
-            self.catalog.return_value = catalog
-            plan = build_allocation_plan(self.invoice_id)
-            self.assertTrue(plan.errors)
+        self.catalog.return_value = (CanonicalWorkType("D301", "土木"), CanonicalWorkType("B301", "建築"))
+        plan = build_allocation_plan(self.invoice_id)
+        self.assertTrue(plan.errors)
         after = [dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)]
         self.assertEqual(before, after)
+
+    def test_basic_d_rule_without_history_is_valid_and_keeps_old_allocation(self) -> None:
+        self.catalog.side_effect = load_work_type_choices
+        self.add_allocation(100, "10")
+        self.set_invoice_total(110)
+        before = [dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)]
+        plan = build_allocation_plan(self.invoice_id)
+        self.assertEqual(plan.errors, ())
+        self.assertEqual(plan.lines[0].code, "D301")
+        self.assertEqual(plan.lines[0].name, "保険料")
+        self.assertEqual([dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)], before)
+
+    def test_unknown_custom_prefix_without_history_is_not_guessed(self) -> None:
+        self.catalog.side_effect = load_work_type_choices
+        code_id = repositories.save_work_type_code(self.project_id, "Z999", "独自工種")
+        repositories.save_invoice_allocation(self.invoice_id, code_id, 100)
+        self.set_invoice_total(110)
+        self.assertIn("確認できません", " ".join(build_allocation_plan(self.invoice_id).errors))
+
+    def test_basic_rule_rejects_disabled_numeric_or_formal_alias(self) -> None:
+        self.catalog.side_effect = load_work_type_choices
+        self.add_allocation(100, "10")
+        self.set_invoice_total(110)
+        with db.get_connection() as connection:
+            connection.execute("UPDATE work_type_codes SET is_active = 0 WHERE project_id = ? AND code = 'D301'", (self.project_id,))
+        self.assertIn("無効化", " ".join(build_allocation_plan(self.invoice_id).errors))
 
     def test_mixed_tax_compares_gross_total_to_invoice_original(self) -> None:
         self.add_allocation(100, "10", "301", 1)

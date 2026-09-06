@@ -70,6 +70,38 @@ class ResolvedAllocationTests(unittest.TestCase):
         self.assertEqual([(row["amount_excluded"], row["tax_rate"], row["amount"]) for row in rows],
                          [(100, "10", 110), (200, "8", 216)])
 
+    def test_basic_d_code_without_history_saves_and_reuses_template_master(self) -> None:
+        repositories.ensure_work_type_codes_for_project(self.project_id)
+        masters = repositories.list_work_type_codes(self.project_id)
+        self.assertTrue(all(row["code"].startswith("D") for row in masters))
+        code_id = next(int(row["id"]) for row in masters if row["code"] == "D301")
+        save_resolved_allocation(self.invoice_id, "301", 100, tax_rate="8")
+        save_resolved_allocation(self.invoice_id, "D301", 200, tax_rate="10")
+        rows = repositories.list_invoice_allocations(self.invoice_id)
+        self.assertEqual({row["work_type_code_id"] for row in rows}, {code_id})
+        self.assertEqual([row["code"] for row in rows], ["D301", "D301"])
+        self.assertEqual(len(repositories.list_work_type_codes(self.project_id)), len(masters))
+
+    def test_basic_rule_keeps_legacy_numeric_row_and_rolls_back_failed_creation(self) -> None:
+        numeric_id = repositories.save_work_type_code(self.project_id, "301", "旧名称", sort_order=77)
+        before = self.database_state()
+        with self.assertRaises(ValueError):
+            save_resolved_allocation(self.invoice_id, "301", 100, tax_rate="5")
+        self.assertEqual(self.database_state(), before)
+        save_resolved_allocation(self.invoice_id, "301", 100)
+        legacy = next(row for row in repositories.list_work_type_codes(self.project_id) if row["id"] == numeric_id)
+        self.assertEqual((legacy["code"], legacy["name"], legacy["sort_order"]), ("301", "旧名称", 77))
+        self.assertEqual(repositories.list_invoice_allocations(self.invoice_id)[0]["code"], "D301")
+
+    def test_basic_rule_rejects_disabled_d_and_numeric_masters(self) -> None:
+        for code in ("301", "D302"):
+            repositories.save_work_type_code(self.project_id, code, "無効工種", is_active=0)
+        before = self.database_state()
+        for value in ("301", "３０１", "D301", "302", "D302"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "無効化"):
+                save_resolved_allocation(self.invoice_id, value, 100)
+            self.assertEqual(self.database_state(), before)
+
     def test_existing_numeric_master_and_allocation_are_not_migrated(self) -> None:
         self.add_history("D301")
         numeric_id = repositories.save_work_type_code(self.project_id, "301", "手入力名称", sort_order=77)

@@ -11,6 +11,7 @@ from invoice_manager.services.work_type_resolution import (
     CanonicalWorkType,
     WorkTypeResolutionError,
     load_confirmed_work_types,
+    load_work_type_choices,
     resolve_from_catalog,
     resolve_work_type_code,
 )
@@ -96,6 +97,7 @@ class ConfirmedWorkTypeCatalogTests(unittest.TestCase):
 
     def test_missing_database_does_not_create_it(self) -> None:
         self.assertEqual(load_confirmed_work_types(1), ())
+        self.assertEqual(load_work_type_choices(1), ())
         self.assertFalse(self.path.exists())
 
     def test_missing_history_tables_do_not_change_schema(self) -> None:
@@ -123,6 +125,41 @@ class ConfirmedWorkTypeCatalogTests(unittest.TestCase):
         self.assertEqual(load_confirmed_work_types(999), ())
         with self.assertRaises(WorkTypeResolutionError):
             resolve_work_type_code(3, "301")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def add_masters(self, rows: tuple[tuple[int, str, str], ...]) -> None:
+        with sqlite3.connect(self.path, factory=db.ClosingConnection) as connection:
+            connection.execute("CREATE TABLE work_type_codes (project_id INTEGER, code TEXT, name TEXT)")
+            connection.executemany("INSERT INTO work_type_codes VALUES (?, ?, ?)", rows)
+
+    def test_named_numeric_or_d_master_uses_basic_rule_without_history(self) -> None:
+        self.initialize_fixture()
+        self.add_masters(((1, "301", "保険料"), (1, "D001", "仮設"), (2, "302", "別工事")))
+        before = self.path.read_bytes()
+        self.assertEqual(resolve_work_type_code(1, "301"), CanonicalWorkType("D301", "保険料", False))
+        self.assertEqual(resolve_work_type_code(1, "００１"), CanonicalWorkType("D001", "仮設", False))
+        for code in ("302", "999"):
+            with self.assertRaisesRegex(WorkTypeResolutionError, "工種コードマスタ"):
+                resolve_work_type_code(1, code)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_actual_prefix_wins_and_ambiguity_is_not_hidden_by_basic_rule(self) -> None:
+        self.initialize_fixture()
+        self.add_masters(((1, "301", "旧保険料"), (1, "D301", "基本保険料"), (1, "302", "給与")))
+        self.add_history(1, "P1", "2026-08-20", "B301", "確認保険料")
+        self.add_history(2, "P1", "2026-08-20", "D302", "土木給与")
+        self.add_history(3, "P1", "2026-08-20", "B302", "建築給与")
+        self.assertEqual(resolve_work_type_code(1, "301"), CanonicalWorkType("B301", "確認保険料"))
+        self.assertNotIn("D301", {item.code for item in load_work_type_choices(1)})
+        with self.assertRaisesRegex(WorkTypeResolutionError, "複数"):
+            resolve_work_type_code(1, "302")
+
+    def test_existing_d_master_name_wins_locally_without_changing_either_row(self) -> None:
+        self.initialize_fixture()
+        self.add_masters(((1, "301", "数字名称"), (1, "D301", "D手入力名称"), (1, "999", " ")))
+        before = self.path.read_bytes()
+        self.assertEqual(resolve_work_type_code(1, "301"), CanonicalWorkType("D301", "D手入力名称", False))
+        self.assertEqual(load_work_type_choices(1), (CanonicalWorkType("D301", "D手入力名称", False),))
         self.assertEqual(self.path.read_bytes(), before)
 
 

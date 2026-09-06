@@ -79,6 +79,19 @@ class CustomWorkTypeTests(unittest.TestCase):
 
         row = next(row for row in repositories.list_work_type_codes(self.project_id) if int(row["id"]) == manual_id)
         self.assertEqual((row["code"], row["name"], row["sort_order"]), ("301", "手動名称", 777))
+        self.assertNotIn("D301", {row["code"] for row in repositories.list_work_type_codes(self.project_id)})
+
+    def test_d_template_preserves_disabled_legacy_and_existing_aliases(self) -> None:
+        legacy_id = repositories.save_work_type_code(self.project_id, "301", "旧無効名称", is_active=0)
+        numeric_id = repositories.save_work_type_code(self.project_id, "302", "数字名")
+        formal_id = repositories.save_work_type_code(self.project_id, "D302", "D手動名", sort_order=333)
+        before = {row["id"]: dict(row) for row in repositories.list_work_type_codes(self.project_id)}
+        repositories.ensure_work_type_codes_for_project(self.project_id)
+        self.assertEqual(repositories.ensure_work_type_codes_for_project(self.project_id), 0)
+        after = {row["id"]: dict(row) for row in repositories.list_work_type_codes(self.project_id)}
+        for identifier in (legacy_id, numeric_id, formal_id):
+            self.assertEqual(after[identifier], before[identifier])
+        self.assertNotIn("D301", {row["code"] for row in after.values()})
 
     def test_renaming_referenced_code_keeps_allocation_reference_intact(self) -> None:
         custom_id = repositories.save_work_type_code(self.project_id, "A-01", "旧名称")

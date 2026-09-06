@@ -1,6 +1,6 @@
-"""Save a user's shorthand selection under the confirmed Digital Billder code."""
+"""Save shorthand using actual codes or the named local D-code rule."""
 from invoice_manager import db, repositories
-from invoice_manager.services.work_type_resolution import load_confirmed_work_types, resolve_from_catalog, WorkTypeResolutionError
+from invoice_manager.services.work_type_resolution import load_work_type_choices, resolve_from_catalog, WorkTypeResolutionError
 
 
 def save_resolved_allocation(invoice_id: int, work_type_input: str, amount: int | None,
@@ -11,7 +11,7 @@ def save_resolved_allocation(invoice_id: int, work_type_input: str, amount: int 
         if invoice is None:
             raise ValueError("請求データが見つかりません。")
         project_id = int(invoice["project_id"])
-        catalog = load_confirmed_work_types(project_id)
+        catalog = load_work_type_choices(project_id)
         canonical = resolve_from_catalog(work_type_input, catalog)
         rows = repositories.list_work_type_codes(project_id)
         existing = next((row for row in rows if row["code"] == canonical.code), None)

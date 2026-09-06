@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS invoice_allocations (
     amount INTEGER NOT NULL,
     amount_excluded INTEGER,
     tax_rate TEXT NOT NULL DEFAULT '10' CHECK(tax_rate IN ('10', '8', 'exempt')),
+    tax_rounding_adjustment INTEGER NOT NULL DEFAULT 0,
     memo TEXT,
     sort_order INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -258,6 +259,7 @@ def initialize_database() -> None:
         _migrate_invoice_billing_month_override(conn)
         _migrate_tax_excluded_amounts(conn)
         _migrate_allocation_tax_rate(conn)
+        _migrate_allocation_rounding_adjustment(conn)
         conn.execute("DROP TABLE IF EXISTS budget_categories")
 
 
@@ -436,6 +438,12 @@ def _migrate_invoice_billing_month_override(conn: sqlite3.Connection) -> None:
             "UPDATE invoices SET billing_month_manual_override = ? WHERE id = ?",
             updates,
         )
+
+
+def _migrate_allocation_rounding_adjustment(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(invoice_allocations)")}
+    if "tax_rounding_adjustment" not in columns:
+        conn.execute("ALTER TABLE invoice_allocations ADD COLUMN tax_rounding_adjustment INTEGER NOT NULL DEFAULT 0")
 
 
 def _migrate_allocation_tax_rate(conn: sqlite3.Connection) -> None:

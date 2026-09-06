@@ -1,4 +1,4 @@
-"""Resolve short input against the project's confirmed Digital Billder history."""
+"""Resolve project codes using confirmed history, then the local D-code rule."""
 
 from __future__ import annotations
 
@@ -14,10 +14,11 @@ from invoice_manager import db
 class CanonicalWorkType:
     code: str
     name: str
+    confirmed: bool = True
 
 
 class WorkTypeResolutionError(ValueError):
-    """The input cannot identify one confirmed work type safely."""
+    """The input cannot identify one project work type safely."""
 
 
 def load_confirmed_work_types(project_id: int) -> tuple[CanonicalWorkType, ...]:
@@ -50,6 +51,37 @@ def load_confirmed_work_types(project_id: int) -> tuple[CanonicalWorkType, ...]:
     return tuple(by_code[code] for code in sorted(by_code))
 
 
+def load_work_type_choices(project_id: int) -> tuple[CanonicalWorkType, ...]:
+    """Prefer actual codes; otherwise supplement named local codes with D + 3 digits."""
+    confirmed = load_confirmed_work_types(project_id)
+    if not db.DB_PATH.exists():
+        return confirmed
+    with db.get_connection() as connection:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_type_codes'"
+        ).fetchone() is None:
+            return confirmed
+        rows = connection.execute(
+            "SELECT code, name FROM work_type_codes WHERE project_id = ? ORDER BY code",
+            (int(project_id),),
+        ).fetchall()
+    actual_numbers = {
+        item.code[-3:] for item in confirmed
+        if re.fullmatch(r"(?:[A-Za-z]+)?[0-9]{3}", item.code)
+    }
+    choices = {item.code: item for item in confirmed}
+    # Add numeric rows first so an existing D-code row keeps its own manual name.
+    local_rows = sorted(rows, key=lambda row: (bool(re.fullmatch(r"D[0-9]{3}", row["code"])), row["code"]))
+    for row in local_rows:
+        code, name = str(row["code"]), str(row["name"])
+        if not re.fullmatch(r"D?[0-9]{3}", code) or not name.strip():
+            continue
+        number = code[-3:]
+        if number not in actual_numbers:
+            choices[f"D{number}"] = CanonicalWorkType(f"D{number}", name, confirmed=False)
+    return tuple(choices[code] for code in sorted(choices))
+
+
 def resolve_from_catalog(value: str, catalog: Iterable[CanonicalWorkType]) -> CanonicalWorkType:
     """Accept an exact official code or an unambiguous three-digit abbreviation."""
     raw = str(value or "").strip()
@@ -74,10 +106,10 @@ def resolve_from_catalog(value: str, catalog: Iterable[CanonicalWorkType]) -> Ca
     elif raw in by_code:
         return by_code[raw]
     raise WorkTypeResolutionError(
-        f"工種コード {raw} は、この工事のDigital Billder保管済み実績で確認できません。"
-        "実績の取得状況と正式コードを確認してください。"
+        f"工種コード {raw} は、この工事の工種マスタまたはDigital Billder保管済み実績で確認できません。"
+        "基本ルールで使う工種は、先に工種コードマスタへ3桁の数字と工種名を登録してください。"
     )
 
 
 def resolve_work_type_code(project_id: int, value: str) -> CanonicalWorkType:
-    return resolve_from_catalog(value, load_confirmed_work_types(project_id))
+    return resolve_from_catalog(value, load_work_type_choices(project_id))

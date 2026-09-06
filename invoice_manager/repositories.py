@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from invoice_manager.db import get_connection
+from invoice_manager.db import atomic_transaction, get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.services.db_backup import create_database_backup
 from invoice_manager.utils.date_utils import billing_month_from_invoice_date, parse_invoice_date, validate_billing_month
@@ -694,6 +694,49 @@ def update_invoice_billing_month(invoice_ids: list[int], billing_month: str) -> 
     return len(updates)
 
 
+def reset_invoice_billing_months_to_auto(invoice_ids: list[int]) -> int:
+    """Reset only the supplied visible invoices to the current automatic month rule."""
+    from invoice_manager.services.test_tools_access import require_test_tools_access
+
+    require_test_tools_access()
+    ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with atomic_transaction():
+        with get_connection() as conn:
+            _require_invoice_ids_visible(conn, ids)
+            rows = conn.execute(
+                f"""SELECT id, invoice_date, billing_month, billing_month_manual_override
+                    FROM invoices WHERE id IN ({placeholders}) ORDER BY id""",
+                ids,
+            ).fetchall()
+            timestamp = now_text()
+            updates = []
+            for row in rows:
+                try:
+                    invoice_date = parse_invoice_date(row["invoice_date"])
+                    automatic_month = billing_month_from_invoice_date(invoice_date)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"請求ID {row['id']} の請求日が未設定または不正なため、自動判定に戻せません。"
+                    ) from exc
+                if row["billing_month"] != automatic_month or row["billing_month_manual_override"]:
+                    updates.append((automatic_month, timestamp, int(row["id"])))
+            if not updates:
+                return 0
+            create_database_backup("before_billing_month_auto_reset")
+            conn.executemany(
+                """UPDATE invoices
+                   SET billing_month = ?, billing_month_manual_override = 0, updated_at = ?
+                   WHERE id = ?""",
+                updates,
+            )
+            changed_ids = ",".join(str(item[2]) for item in updates)
+            add_audit_log("請求月自動判定へリセット", "invoices", None, f"{len(updates)}件: 請求ID {changed_ids}")
+    return len(updates)
+
+
 def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
     ids = list(dict.fromkeys(int(invoice_id) for invoice_id in invoice_ids))
     if not ids:
@@ -722,6 +765,9 @@ def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
 
 
 def recalculate_invoice_billing_months(project_id: int) -> int:
+    from invoice_manager.services.test_tools_access import require_test_tools_access
+
+    require_test_tools_access()
     with get_connection() as conn:
         _require_project_visible(conn, project_id)
         rows = conn.execute(
@@ -810,7 +856,8 @@ def ensure_work_type_codes_for_project(project_id: int) -> int:
         inserts = []
         for index, (code, name) in enumerate(WORK_TYPE_CODE_CATALOG, start=1):
             current = existing.get(code)
-            if current is None:
+            # Preserve legacy numeric master IDs, manual names and inactive state.
+            if current is None and code[1:] not in existing:
                 inserts.append((int(project_id), code, name, index, timestamp, timestamp))
         if not inserts:
             return 0
@@ -1014,7 +1061,7 @@ def save_invoice_allocation(
         if allocation_id:
             _require_allocation_visible(conn, allocation_id)
             existing = conn.execute(
-                "SELECT invoice_id, amount, amount_excluded, tax_rate FROM invoice_allocations WHERE id = ?",
+                "SELECT invoice_id, amount, amount_excluded, tax_rate, tax_rounding_adjustment FROM invoice_allocations WHERE id = ?",
                 (int(allocation_id),),
             ).fetchone()
             if existing is None or int(existing["invoice_id"]) != int(invoice_id):
@@ -1022,15 +1069,17 @@ def save_invoice_allocation(
         resolved_rate = tax_rate if tax_rate is not None else (existing["tax_rate"] if existing else "10")
         tax_rate_percent(resolved_rate)
         included_amount = tax_included_amount(normalized_amount, resolved_rate)
+        rounding_adjustment = 0
         if allocation_id:
             if (existing["amount_excluded"] is not None
                     and int(existing["amount_excluded"]) == normalized_amount
                     and existing["tax_rate"] == resolved_rate):
                 included_amount = int(existing["amount"])
+                rounding_adjustment = int(existing["tax_rounding_adjustment"])
             conn.execute(
                 """
                 UPDATE invoice_allocations
-                SET work_type_code_id = ?, amount = ?, amount_excluded = ?, tax_rate = ?, memo = ?, sort_order = ?, updated_at = ?
+                SET work_type_code_id = ?, amount = ?, amount_excluded = ?, tax_rate = ?, memo = ?, sort_order = ?, updated_at = ?, tax_rounding_adjustment = ?
                 WHERE id = ?
                 """,
                 (
@@ -1041,6 +1090,7 @@ def save_invoice_allocation(
                     memo,
                     sort_order,
                     timestamp,
+                    rounding_adjustment,
                     allocation_id,
                 ),
             )

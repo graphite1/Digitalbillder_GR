@@ -6,7 +6,7 @@ import threading
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from invoice_manager.services.historical_costs import (
     ACTUAL_SOURCE,
@@ -18,6 +18,7 @@ from invoice_manager.services.historical_costs import (
     list_historical_work_type_suggestions,
 )
 from invoice_manager.utils.money_utils import format_amount
+from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 
 
 ALL_LABEL = "すべて"
@@ -52,6 +53,7 @@ class HistoricalCostWindow(tk.Toplevel):
         self.busy = False
         self.closing = False
         self.poll_id: str | None = None
+        self.activity = BackgroundActivity(self, "保管済み実績の取得")
 
         self._build()
         self.reload()
@@ -60,6 +62,7 @@ class HistoricalCostWindow(tk.Toplevel):
         self.poll_id = self.after(100, self._poll_events)
 
     def _build(self) -> None:
+        ActivityPanel(self, activity=self.activity).pack(fill=tk.X, padx=10, pady=(8, 0))
         toolbar = ttk.Frame(self, padding=(10, 8))
         toolbar.pack(fill=tk.X)
         ttk.Button(toolbar, text="表示を更新", command=self.reload).pack(side=tk.LEFT)
@@ -289,7 +292,7 @@ class HistoricalCostWindow(tk.Toplevel):
             self.refresh_button.configure(state=tk.DISABLED)
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.DISABLED)
-        self.history_status.configure(text="保管済み履歴を取得中…")
+        self.activity.start("保管済み履歴を全件再検証中…" if full else "保管済み履歴の追加・変更分を確認中…")
         events = self.events
 
         def progress(message: str) -> None:
@@ -309,7 +312,10 @@ class HistoricalCostWindow(tk.Toplevel):
             else:
                 events.put(("done", result))
 
-        threading.Thread(target=worker, name="historical-cost-refresh", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name="historical-cost-refresh", daemon=False).start()
+        except Exception as exc:
+            events.put(("error", exc))
 
     def _poll_events(self) -> None:
         if self.closing:
@@ -318,10 +324,13 @@ class HistoricalCostWindow(tk.Toplevel):
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == "progress":
-                    self.history_status.configure(text=str(value))
+                    self.activity.update(str(value))
                 elif kind == "done":
                     self.busy = False
-                    self._refresh_completed(value)
+                    try:
+                        self._refresh_completed(value)
+                    except Exception as exc:
+                        self._refresh_failed(exc)
                 elif kind == "error":
                     self.busy = False
                     error = value if isinstance(value, Exception) else RuntimeError(str(value))
@@ -337,26 +346,21 @@ class HistoricalCostWindow(tk.Toplevel):
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.NORMAL)
         self.reload()
-        if isinstance(result, str) and result.strip():
-            messagebox.showinfo("履歴取得完了", result.strip(), parent=self)
+        message = result.strip() if isinstance(result, str) and result.strip() else "保管済み履歴の取得が完了しました。"
+        self.activity.finish(message)
 
     def _refresh_failed(self, error: Exception) -> None:
         if self.refresh_button is not None:
             self.refresh_button.configure(state=tk.NORMAL)
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.NORMAL)
-        status = get_historical_sync_status()
-        suffix = "前回の取得結果を維持しました。" if status.last_successful_refresh else "履歴は更新されていません。"
+        suffix = "保存済みの実績は「表示を更新」で確認できます。"
         self.history_status.configure(text=f"履歴取得に失敗しました。{suffix}")
-        messagebox.showerror("履歴取得エラー", f"{error}\n\n{suffix}", parent=self)
+        self.activity.finish(f"履歴取得に失敗しました: {error}。{suffix}", failed=True)
 
     def close(self) -> None:
         if self.busy:
-            messagebox.showinfo(
-                "履歴取得中",
-                "保管済み履歴を取得中です。完了してから閉じてください。",
-                parent=self,
-            )
+            self.withdraw()
             return
         self.closing = True
         self._cancel_poll()

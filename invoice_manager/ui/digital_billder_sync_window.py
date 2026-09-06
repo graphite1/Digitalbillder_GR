@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from invoice_manager.repositories import get_app_setting
+from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 from invoice_manager.services.digital_billder_credentials import (
     ACCOUNT_KEY,
     CredentialDependencyError,
@@ -32,8 +33,9 @@ class DigitalBillderSyncWindow(tk.Toplevel):
         self.minsize(820, 440)
         if master.state() != "withdrawn":
             self.transient(master)
-        self.grab_set()
         self.busy = False
+        self.closing = False
+        self.activity = BackgroundActivity(self, "新着確認・請求取込")
         self.on_close = on_close
         self.events = queue.Queue()
         self.show_excluded = tk.BooleanVar(value=False)
@@ -70,12 +72,12 @@ class DigitalBillderSyncWindow(tk.Toplevel):
         horizontal.grid(row=1, column=0, sticky="ew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill=tk.X, padx=12)
+        ActivityPanel(self, activity=self.activity).pack(fill=tk.X, padx=12, before=frame)
         ttk.Label(self, textvariable=self.status, padding=12, wraplength=1050).pack(fill=tk.X)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
         self.poll_id = self.after(150, self.poll)
+        self.bind("<Destroy>", self._on_destroy, add=True)
 
     def refresh(self):
         rows = list_candidates("excluded" if self.show_excluded.get() else "pending")
@@ -100,12 +102,13 @@ class DigitalBillderSyncWindow(tk.Toplevel):
     def select_all(self):
         self.tree.selection_set(self.tree.get_children())
 
-    def start(self, function):
+    def start(self, function, message="処理を開始しています…"):
         if self.busy:
             return
         self.busy = True
         self.update_buttons()
-        self.progress.start()
+        self.status.set(message)
+        self.activity.start(message)
 
         def work():
             try:
@@ -114,26 +117,43 @@ class DigitalBillderSyncWindow(tk.Toplevel):
             except Exception as exc:
                 self.events.put(("error", str(exc)))
 
-        threading.Thread(target=work, daemon=False).start()
+        try:
+            threading.Thread(target=work, daemon=False).start()
+        except Exception:
+            self.busy = False
+            self.status.set("処理を開始できませんでした。もう一度実行してください。")
+            self.activity.finish(self.status.get(), failed=True)
+            self.update_buttons()
 
     def poll(self):
+        self.poll_id = None
+        if self.closing:
+            return
         try:
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == "progress":
                     self.status.set(value)
+                    self.activity.update(value)
                     continue
                 self.busy = False
-                self.progress.stop()
-                self.refresh()
+                self.activity.finish(str(value), failed=kind == "error")
+                try:
+                    self.refresh()
+                except Exception:
+                    message = f"{value}\n処理後の一覧再表示に失敗しました。もう一度一覧を表示してください。"
+                    self.status.set(message)
+                    self.activity.finish(message, failed=True)
+                    self.update_buttons()
+                    continue
                 if kind == "error":
                     self.status.set(value)
-                    messagebox.showerror("新着取込", value, parent=self)
                 else:
                     self.status.set(value)
         except queue.Empty:
             pass
-        self.poll_id = self.after(150, self.poll)
+        if not self.closing:
+            self.poll_id = self.after(150, self.poll)
 
     def fetch(self):
         self.show_excluded.set(False)
@@ -142,7 +162,7 @@ class DigitalBillderSyncWindow(tk.Toplevel):
             count = fetch_candidates(progress)
             return f"未確認: {count}件。必要な請求を選択して取り込むか、不要な請求を除外してください。"
 
-        self.start(run)
+        self.start(run, "新着確認を開始しています。ほかの画面も操作できます。")
 
     def import_rows(self):
         ids = set(self.tree.selection())
@@ -153,7 +173,7 @@ class DigitalBillderSyncWindow(tk.Toplevel):
             result = import_selected(ids, progress)
             return f"取込完了: {result.inserted_count}件 / PDF: {result.file_count}件"
 
-        self.start(run)
+        self.start(run, f"選択した{len(ids)}件の取込を開始しています。ほかの画面も操作できます。")
 
     def exclude(self):
         ids = set(self.tree.selection())
@@ -187,7 +207,6 @@ class DigitalBillderSyncWindow(tk.Toplevel):
         def close():
             password.set("")
             dialog.destroy()
-            self.grab_set()
 
         def save():
             try:
@@ -203,12 +222,16 @@ class DigitalBillderSyncWindow(tk.Toplevel):
 
     def close(self):
         if self.busy:
-            self.status.set("処理中です。完了してから閉じてください。")
+            self.withdraw()
             return
-        master = self.master
-        self.after_cancel(self.poll_id)
         self.destroy()
         if self.on_close:
             self.on_close()
-        elif master.winfo_exists():
-            master.grab_set()
+
+    def _on_destroy(self, event):
+        if event.widget is not self:
+            return
+        self.closing = True
+        if self.poll_id is not None:
+            self.after_cancel(self.poll_id)
+            self.poll_id = None
