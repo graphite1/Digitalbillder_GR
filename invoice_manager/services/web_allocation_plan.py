@@ -8,6 +8,7 @@ from uuid import UUID
 
 from invoice_manager.repositories import get_invoice_detail, list_invoice_allocations, list_work_type_codes
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS, tax_included_amount
+from invoice_manager.services.work_type_resolution import load_confirmed_work_types, resolve_from_catalog, WorkTypeResolutionError
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,16 @@ def build_allocation_plan(invoice_id: int) -> AllocationPlan:
         UUID(external_id)
     except (ValueError, TypeError, AttributeError):
         errors.append("Webの請求書IDとして確認できない形式です。")
-    active_codes = {int(row["id"]) for row in list_work_type_codes(int(invoice["project_id"]), active_only=True)}
+    masters = list_work_type_codes(int(invoice["project_id"]))
+    active_codes = {int(row["id"]) for row in masters if row["is_active"]}
+    canonical_codes = load_confirmed_work_types(int(invoice["project_id"]))
+    disabled_codes = set()
+    for master in masters:
+        if not master["is_active"]:
+            try:
+                disabled_codes.add(resolve_from_catalog(master["code"], canonical_codes).code)
+            except WorkTypeResolutionError:
+                disabled_codes.add(master["code"])
     lines = []
     for row in list_invoice_allocations(invoice_id):
         rate = row["tax_rate"]
@@ -72,7 +82,15 @@ def build_allocation_plan(invoice_id: int) -> AllocationPlan:
             errors.append("税抜金額が0円以下の振分行があります。")
         if rate in TAX_RATE_LABELS and tax_included_amount(amount, rate) != included:
             errors.append("保存済みの税込金額と税率計算に差があります。端数の扱いを確認してください。")
-        lines.append(AllocationLine(row["code"], row["name"], amount, rate, included - amount, included))
+        code, name = row["code"], row["name"]
+        try:
+            canonical = resolve_from_catalog(code, canonical_codes)
+            code, name = canonical.code, canonical.name
+            if code in disabled_codes:
+                errors.append("この工事で無効化された工種コードがあります。")
+        except WorkTypeResolutionError as exc:
+            errors.append(str(exc))
+        lines.append(AllocationLine(code, name, amount, rate, included - amount, included))
     if not lines:
         errors.append("工種振分を入力してください。")
     invoice_amount = int(invoice["total_amount"])

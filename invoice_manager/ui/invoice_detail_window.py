@@ -25,8 +25,6 @@ from invoice_manager.repositories import (
     list_recent_work_type_codes_for_project_vendor,
     list_vendor_work_type_candidates,
     list_work_type_codes,
-    save_invoice_allocation,
-    save_work_type_code,
     update_pdf_mark_position,
     update_invoice_memo,
 )
@@ -35,6 +33,8 @@ from invoice_manager.utils.file_size_utils import format_file_size
 from invoice_manager.utils.date_utils import format_billing_month
 from invoice_manager.utils.file_safety import validate_original_pdf_path
 from invoice_manager.utils.money_utils import TAX_RATE_LABELS, format_amount, tax_excluded_amount, tax_included_amount
+from invoice_manager.services.allocation_work_types import save_resolved_allocation
+from invoice_manager.services.work_type_resolution import load_confirmed_work_types, resolve_from_catalog, WorkTypeResolutionError
 
 
 class InvoiceDetailWindow(tk.Toplevel):
@@ -60,7 +60,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.allocation_amounts: dict[str, int] = {}
         self.allocation_rates: dict[str, str] = {}
         self.allocation_gross: dict[str, int] = {}
-        self.work_type_options: dict[str, int] = {}
+        self.work_type_options: dict[str, str] = {}
         self.amount_display_mode = amount_display_mode
         self.pdf_path: str | None = None
         self.current_invoice_file_id: int | None = None
@@ -293,8 +293,34 @@ class InvoiceDetailWindow(tk.Toplevel):
                     row["code"],
                 )
             )
-        for row in work_type_rows:
-            self.work_type_options[f"{row['code']}｜{row['name']}"] = int(row["id"])
+        self.confirmed_work_types = load_confirmed_work_types(self.project_id)
+        disabled_codes = {row["code"] for row in list_work_type_codes(self.project_id) if not row["is_active"]}
+        for code in tuple(disabled_codes):
+            try:
+                disabled_codes.add(resolve_from_catalog(code, self.confirmed_work_types).code)
+            except WorkTypeResolutionError:
+                pass
+        candidates = [(row["code"], row["name"]) for row in work_type_rows]
+        candidates.extend((item.code, item.name) for item in self.confirmed_work_types)
+        added = set()
+        for code, name in candidates:
+            if code in disabled_codes:
+                continue
+            try:
+                canonical = resolve_from_catalog(code, self.confirmed_work_types)
+                if canonical.code in disabled_codes:
+                    continue
+                code, name = canonical.code, canonical.name
+                short = code[-3:]
+                try:
+                    display_code = short if resolve_from_catalog(short, self.confirmed_work_types).code == code else code
+                except WorkTypeResolutionError:
+                    display_code = code
+            except WorkTypeResolutionError:
+                display_code, name = code, f"{name}（実績側未確認）"
+            if code not in added:
+                self.work_type_options[f"{display_code}｜{name}"] = code
+                added.add(code)
 
     def load_allocations(self) -> None:
         self.allocations.delete(*self.allocations.get_children())
@@ -309,10 +335,16 @@ class InvoiceDetailWindow(tk.Toplevel):
             excluded_value = row["amount_excluded"]
             amount_excluded = tax_excluded_amount(stored_amount, tax_rate) if excluded_value is None else int(excluded_value)
             display_amount = "" if amount_excluded == 0 else format_amount(amount_excluded)
+            code, name = row["code"], row["name"]
+            try:
+                canonical = resolve_from_catalog(code, getattr(self, "confirmed_work_types", ()))
+                code, name = canonical.code, canonical.name
+            except WorkTypeResolutionError:
+                pass
             item_id = self.allocations.insert(
                 "",
                 tk.END,
-                values=(row["code"], row["name"], display_amount, row["memo"] or "", row["sort_order"], TAX_RATE_LABELS[tax_rate]),
+                values=(code, name, display_amount, row["memo"] or "", row["sort_order"], TAX_RATE_LABELS[tax_rate]),
             )
             self.allocation_ids[item_id] = int(row["id"])
             self.allocation_amounts[item_id] = amount_excluded
@@ -502,20 +534,14 @@ class InvoiceDetailWindow(tk.Toplevel):
             if not selected:
                 return
             item = entries[selected[0]]
-            existing = next((row for row in list_work_type_codes(self.project_id) if row["code"] == item.work_type_code), None)
-            if existing and not existing["is_active"]:
-                messagebox.showinfo("無効な工種", "この工事で無効化されたコードです。工種コードマスタで確認してください。", parent=dialog)
-                return
-            name = existing["name"] if existing else item.work_type_name
             try:
-                if existing is None:
-                    save_work_type_code(self.project_id, item.work_type_code, name)
-            except Exception as exc:
-                messagebox.showerror("工種追加エラー", str(exc), parent=dialog)
+                canonical = resolve_from_catalog(item.work_type_code, self.confirmed_work_types)
+            except WorkTypeResolutionError as exc:
+                messagebox.showerror("工種確認", str(exc), parent=dialog)
                 return
             self.load_work_type_options()
             dialog.destroy()
-            self.open_allocation_dialog(values=(item.work_type_code, name, "", "", "0", "10", 0))
+            self.open_allocation_dialog(values=(canonical.code, canonical.name, "", "", "0", "10", 0))
 
         ttk.Button(dialog, text="選択した工種で振分を入力", command=use_suggestion).pack(side=tk.LEFT, padx=12, pady=12)
         ttk.Button(dialog, text="閉じる", command=dialog.destroy).pack(side=tk.RIGHT, padx=12, pady=12)
@@ -536,11 +562,12 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         dialog = tk.Toplevel(self)
         dialog.title("振分行（税抜入力）")
-        dialog.geometry("460x340")
+        dialog.geometry("540x380")
         dialog.transient(self)
         dialog.grab_set()
 
-        selected_work_type = tk.StringVar(value=next(iter(self.work_type_options.keys())))
+        selected_work_type = tk.StringVar()
+        resolved_work_type = tk.StringVar()
         amount_var = tk.StringVar()
         memo_var = tk.StringVar()
         sort_order_var = tk.StringVar(value="0")
@@ -549,21 +576,25 @@ class InvoiceDetailWindow(tk.Toplevel):
         gross_amount_var = tk.StringVar()
         rate_keys = {label: key for key, label in TAX_RATE_LABELS.items()}
         if values:
-            label_prefix = f"{values[0]}｜{values[1]}"
-            for label in self.work_type_options:
-                if label == label_prefix:
+            selected_work_type.set(values[0])
+            try:
+                initial_code = resolve_from_catalog(values[0], self.confirmed_work_types).code
+            except WorkTypeResolutionError:
+                initial_code = values[0]
+            for label, code in self.work_type_options.items():
+                if code == initial_code:
                     selected_work_type.set(label)
                     break
             amount_var.set(values[2])
             memo_var.set(values[3])
             sort_order_var.set(values[4])
 
-        tk.Label(dialog, text="工種コード").grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 4))
+        tk.Label(dialog, text="工種コード（3桁入力）").grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 4))
         ttk.Combobox(
             dialog,
             textvariable=selected_work_type,
             values=list(self.work_type_options.keys()),
-            state="readonly",
+            state="normal",
             width=34,
         ).grid(row=0, column=1, sticky=tk.W, padx=4, pady=(12, 4))
         tk.Label(dialog, text="金額(税抜)").grid(row=1, column=0, sticky=tk.W, padx=12, pady=4)
@@ -578,6 +609,23 @@ class InvoiceDetailWindow(tk.Toplevel):
         tk.Entry(dialog, textvariable=memo_var, width=36).grid(row=5, column=1, sticky=tk.W, padx=4, pady=4)
         tk.Label(dialog, text="並び順").grid(row=6, column=0, sticky=tk.W, padx=12, pady=4)
         tk.Entry(dialog, textvariable=sort_order_var).grid(row=6, column=1, sticky=tk.W, padx=4, pady=4)
+        tk.Label(dialog, textvariable=resolved_work_type, wraplength=500, justify=tk.LEFT).grid(
+            row=7, column=0, columnspan=2, sticky=tk.W, padx=12, pady=4
+        )
+
+        def selected_code() -> str:
+            text = selected_work_type.get().strip()
+            return self.work_type_options.get(text, text)
+
+        def update_work_type_preview(*_args) -> None:
+            try:
+                item = resolve_from_catalog(selected_code(), self.confirmed_work_types)
+                resolved_work_type.set(f"実績側の正式コード: {item.code}｜{item.name}")
+            except WorkTypeResolutionError as exc:
+                resolved_work_type.set(str(exc) if selected_work_type.get() else "3桁の数字を入力するか、工種を選択してください。")
+
+        selected_work_type.trace_add("write", update_work_type_preview)
+        update_work_type_preview()
 
         def update_tax_preview(*_args) -> None:
             try:
@@ -599,9 +647,9 @@ class InvoiceDetailWindow(tk.Toplevel):
         def save() -> None:
             try:
                 amount_text = amount_var.get().replace(",", "").strip()
-                save_invoice_allocation(
+                save_resolved_allocation(
                     invoice_id=self.invoice_id,
-                    work_type_code_id=self.work_type_options[selected_work_type.get()],
+                    work_type_input=selected_code(),
                     amount=int(amount_text) if amount_text else None,
                     memo=memo_var.get(),
                     sort_order=int(sort_order_var.get() or 0),
@@ -612,10 +660,11 @@ class InvoiceDetailWindow(tk.Toplevel):
                 messagebox.showerror("保存エラー", str(exc))
                 return
             dialog.destroy()
+            self.load_work_type_options()
             self.load_allocations()
 
         buttons = tk.Frame(dialog)
-        buttons.grid(row=7, column=0, columnspan=2, sticky=tk.W, padx=12, pady=10)
+        buttons.grid(row=8, column=0, columnspan=2, sticky=tk.W, padx=12, pady=10)
         tk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=4)
         tk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side=tk.LEFT, padx=4)
         dialog.wait_window()

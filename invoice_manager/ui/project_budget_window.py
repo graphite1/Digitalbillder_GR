@@ -132,7 +132,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         editor.grid(row=3, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
         for column in range(6):
             editor.columnconfigure(column, weight=1, uniform="editor")
-        labels = ("原本コード", "科目", "実行予算(税抜)", "予定金額(税抜)", "残工事見込(税抜)", "Web工種対応")
+        labels = ("原本コード", "科目", "実行予算(税抜)", "予定金額(税抜)", "残工事見込(税抜)", "Web工種対応（3桁可）")
         for column, label in enumerate(labels):
             ttk.Label(editor, text=label).grid(row=0, column=column, sticky=tk.W, padx=3)
         ttk.Entry(editor, textvariable=self.code_var, width=13).grid(row=1, column=0, sticky=tk.EW, padx=3)
@@ -427,7 +427,12 @@ class ProjectBudgetWindow(tk.Toplevel):
         text = self.actual_code_var.get().strip()
         if not text:
             return None
-        return self.code_name_options.get(text, (text.split("｜", 1)[0].strip(), ""))[0] or None
+        from invoice_manager.services.work_type_resolution import resolve_work_type_code
+        code = self.code_name_options.get(text, (text.split("｜", 1)[0].strip(), ""))[0]
+        project_id = self._project_id()
+        if project_id is None:
+            raise ValueError("工事を選択してください。")
+        return resolve_work_type_code(project_id, code).code
 
     def _apply_row(self) -> None:
         try:

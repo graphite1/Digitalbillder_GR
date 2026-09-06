@@ -4,9 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from uuid import UUID
+from unittest.mock import patch
 
 from invoice_manager import db, repositories
 from invoice_manager.models import InvoiceCsvRow
+from invoice_manager.services.work_type_resolution import CanonicalWorkType
 from invoice_manager.services.web_allocation_plan import (
     AllocationLine,
     build_allocation_plan,
@@ -36,6 +38,12 @@ def make_row(total_amount: int) -> InvoiceCsvRow:
 
 class WebAllocationPlanTests(unittest.TestCase):
     def setUp(self) -> None:
+        catalog_patch = patch(
+            "invoice_manager.services.web_allocation_plan.load_confirmed_work_types",
+            return_value=tuple(CanonicalWorkType(f"D{code}", f"実績名称{code}") for code in ("301", "302", "303")),
+        )
+        self.catalog = catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.original_data_dir = db.DATA_DIR
         self.original_db_path = db.DB_PATH
@@ -86,6 +94,19 @@ class WebAllocationPlanTests(unittest.TestCase):
         self.assertEqual([line.amount_included for line in plan.lines], [110, 108, 100])
         self.assertEqual(plan.total_included, 318)
         self.assertEqual(plan.errors, ())
+        self.assertEqual([line.code for line in plan.lines], ["D301", "D302", "D303"])
+        self.assertEqual(plan.lines[0].name, "実績名称301")
+
+    def test_unknown_or_ambiguous_codes_block_plan_without_changing_allocations(self) -> None:
+        self.add_allocation(100, "10")
+        self.set_invoice_total(110)
+        before = [dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)]
+        for catalog in ((), (CanonicalWorkType("D301", "土木"), CanonicalWorkType("B301", "建築"))):
+            self.catalog.return_value = catalog
+            plan = build_allocation_plan(self.invoice_id)
+            self.assertTrue(plan.errors)
+        after = [dict(row) for row in repositories.list_invoice_allocations(self.invoice_id)]
+        self.assertEqual(before, after)
 
     def test_mixed_tax_compares_gross_total_to_invoice_original(self) -> None:
         self.add_allocation(100, "10", "301", 1)
