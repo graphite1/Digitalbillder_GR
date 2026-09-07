@@ -75,6 +75,52 @@ class RepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual(summary.duplicate_candidate_ids, {"DUPLICATE"})
         self.assertEqual(summary.new_ids, {"NEW"})
 
+    def test_duplicate_check_marks_same_batch_different_ids_regardless_of_order(self) -> None:
+        first = make_row("BATCH-A")
+        second = make_row("BATCH-B")
+
+        forward = duplicate_checker.check_duplicates([first, second])
+        reverse = duplicate_checker.check_duplicates([second, first])
+
+        self.assertEqual(forward.duplicate_candidate_ids, {"BATCH-A", "BATCH-B"})
+        self.assertEqual(forward.new_ids, set())
+        self.assertEqual(reverse.duplicate_candidate_ids, {"BATCH-A", "BATCH-B"})
+        self.assertEqual(reverse.new_ids, set())
+
+    def test_duplicate_check_distinguishes_project_vendor_date_and_amount(self) -> None:
+        rows = [
+            make_row("BASE"),
+            make_row("OTHER-PROJECT", project_code="P002"),
+            make_row("OTHER-VENDOR", vendor_name="取引先B"),
+            make_row("OTHER-DATE", invoice_date="2026-08-21"),
+            make_row("OTHER-AMOUNT", total_amount=110_001),
+        ]
+
+        summary = duplicate_checker.check_duplicates(rows)
+
+        self.assertEqual(summary.duplicate_candidate_ids, set())
+        self.assertEqual(summary.new_ids, {row.external_id for row in rows})
+
+    def test_update_candidate_takes_precedence_over_batch_duplicate(self) -> None:
+        batch_id = repositories.create_import_batch(
+            "2026-09",
+            Path("source.csv"),
+            Path("source.zip"),
+            "csv-hash",
+            "zip-hash",
+            "",
+        )
+        repositories.insert_invoice(make_row("EXISTING", total_amount=110_000), "2026-09", batch_id)
+
+        summary = duplicate_checker.check_duplicates([
+            make_row("EXISTING", total_amount=220_000),
+            make_row("NEW-SAME-SIGNATURE", total_amount=220_000),
+        ])
+
+        self.assertEqual(summary.update_candidate_ids, {"EXISTING"})
+        self.assertEqual(summary.duplicate_candidate_ids, {"NEW-SAME-SIGNATURE"})
+        self.assertEqual(summary.new_ids, set())
+
     def test_work_type_catalog_does_not_rewrite_unchanged_rows(self) -> None:
         project_id = repositories.get_or_create_project("P001", "工事A")
         timestamps = ["2026-09-04 10:00:00", "2026-09-04 11:00:00"]

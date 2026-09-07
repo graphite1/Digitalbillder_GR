@@ -7,16 +7,23 @@ reviewed/edited rows before this module writes a budget.
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import os
+import queue
 import re
 import shutil
+import subprocess
+import sys
+import threading
+import tempfile
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
 from invoice_manager import db
+from invoice_manager.services.operation_cancellation import OperationCancelled, check_cancelled
 from invoice_manager.services.work_type_resolution import (
     CanonicalWorkType,
     WorkTypeResolutionError,
@@ -108,6 +115,7 @@ class SourcePreview:
     preview_text: str
     candidates: tuple[ExtractedBudgetCandidate, ...]
     warnings: tuple[str, ...]
+    source_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +421,19 @@ def _validate_source(path: str | Path) -> Path:
     return source
 
 
+def _source_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            check_cancelled()
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    check_cancelled()
+    return digest.hexdigest()
+
+
 def _is_under(path: Path, parent: Path) -> bool:
     try:
         return os.path.commonpath((str(path), str(parent))) == str(parent)
@@ -432,16 +453,48 @@ def resolve_budget_source(stored_path: str) -> Path:
     return resolved
 
 
-def _copy_source(source_path: str | Path, project_id: int) -> tuple[str, str, str, str]:
+def _copy_source(
+    source_path: str | Path, project_id: int, *, expected_hash: str | None = None,
+) -> tuple[str, str, str, str]:
     source = _validate_source(source_path)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    digest = _source_digest(source)
+    if expected_hash is not None and digest != expected_hash:
+        raise ValueError("確認後に予算原本が変更されました。原本を読み直してください。")
     safe_name = re.sub(r"[^\w.()-]+", "_", source.name, flags=re.UNICODE).strip("._")
     safe_name = safe_name[-100:] or f"source{source.suffix.lower()}"
     relative = Path("budgets") / f"project-{int(project_id)}" / f"{digest[:16]}_{safe_name}"
     destination = resolve_budget_source(relative.as_posix())
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists():
-        shutil.copy2(source, destination)
+    if destination.exists():
+        if not destination.is_file() or _source_digest(destination) != digest:
+            raise ValueError("保存済み予算原本の内容が一致しません。上書きせず停止しました。")
+    else:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".budget-copy-", suffix=".tmp", dir=destination.parent)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            check_cancelled()
+            shutil.copy2(source, temporary)
+            if temporary.stat().st_size > MAX_SOURCE_BYTES or _source_digest(temporary) != digest:
+                raise ValueError("コピー中に予算原本が変更されました。原本を読み直してください。")
+            check_cancelled()
+            try:
+                if os.name == "nt":
+                    # Windows rename is atomic and refuses an existing destination.
+                    os.rename(temporary, destination)
+                else:
+                    # POSIX rename can overwrite; create a non-replacing hard link instead.
+                    os.link(temporary, destination)
+            except FileExistsError:
+                if not destination.is_file() or _source_digest(destination) != digest:
+                    raise ValueError("保存済み予算原本の内容が一致しません。上書きせず停止しました。") from None
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                # copy2 may copy a Windows read-only flag; only this owned temp is changed.
+                temporary.chmod(0o600)
+                temporary.unlink(missing_ok=True)
     return source.name, relative.as_posix(), digest, source.suffix.lower().lstrip(".")
 
 
@@ -472,7 +525,9 @@ def save_project_budget(
         source_path = source_preview.path
     if source_preview is not None and Path(source_path).resolve() != source_preview.path.resolve():
         raise ValueError("確認した原本と保存する原本が一致しません。")
-    source_values = _copy_source(source_path, project_id) if source_path is not None else None
+    source_values = (_copy_source(source_path, project_id,
+                                 expected_hash=source_preview.source_sha256 if source_preview is not None else None)
+                     if source_path is not None else None)
     timestamp = _now_text()
 
     with db.atomic_transaction():
@@ -574,8 +629,12 @@ def save_project_budget(
                     if row.source_candidate is not None
                     else (previous["source_candidate_json"] if previous is not None else None)
                 )
+                keeps_saved_source = previous is not None and source_json == previous["source_candidate_json"]
+                if (row.source_candidate is not None and source_preview is not None
+                        and not keeps_saved_source and row.source_candidate not in source_preview.candidates):
+                    raise ValueError("別の予算原本の未保存候補が含まれています。原本ごとに確認して保存してください。")
                 row_proposal_id = (
-                    proposal_id if row.source_candidate is not None and proposal_id is not None
+                    proposal_id if row.source_candidate is not None and proposal_id is not None and not keeps_saved_source
                     else (previous["source_proposal_id"] if previous is not None else None)
                 )
                 if previous is None:
@@ -721,11 +780,109 @@ def build_project_forecast(project_id: int) -> tuple[ForecastRow, ...]:
     return tuple(result)
 
 
-def preview_source_document(path: str | Path, *, page_number: int = 2) -> SourcePreview:
+def preview_source_document(path: str | Path, *, page_number: int = 2, progress=lambda _text: None) -> SourcePreview:
+    check_cancelled()
+    progress("1/4 原本ファイルを確認しています")
     source = _validate_source(path)
+    digest = _source_digest(source)
+    check_cancelled()
     if source.suffix.lower() == ".pdf":
-        return _preview_pdf(source, page_number=page_number)
-    return _preview_workbook(source)
+        preview = _preview_pdf(source, page_number=page_number, progress=progress)
+    else:
+        progress("2/4 Excelの内容を読み取っています")
+        preview = _preview_workbook(source)
+    check_cancelled()
+    progress("4/4 抽出結果と原本の一致を確認しています")
+    if _source_digest(source) != digest:
+        raise ValueError("読取中に予算原本が変更されました。原本を読み直してください。")
+    check_cancelled()
+    return replace(preview, source_sha256=digest)
+
+
+def _source_preview_worker(path: str, page_number: int) -> None:
+    """Child-process entrypoint: PDF libraries never run on the GUI process threads."""
+    output = sys.stdout
+
+    def send(kind, value):
+        output.write("BUDGET_PREVIEW:" + json.dumps([kind, value], ensure_ascii=False) + "\n")
+        output.flush()
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            preview = preview_source_document(path, page_number=page_number, progress=lambda text: send("progress", text))
+        payload = asdict(preview)
+        payload["path"] = str(preview.path)
+        send("done", payload)
+    except Exception as exc:
+        send("error", str(exc))
+
+
+def preview_source_document_isolated(
+    path: str | Path, *, page_number: int = 2, progress=lambda _text: None,
+) -> SourcePreview:
+    """Run read-only parsing in an owned process, with cancellable queue polling."""
+    check_cancelled()
+    source = str(Path(path).expanduser().resolve())
+    package_root = str(Path(__file__).resolve().parents[2])
+    script = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from invoice_manager.services.project_budget import _source_preview_worker; "
+        "_source_preview_worker(sys.argv[2], int(sys.argv[3]))"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-X", "utf8", "-u", "-c", script, package_root, source, str(page_number)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    events = queue.Queue()
+
+    def read_output():
+        try:
+            for line in process.stdout:
+                if line.startswith("BUDGET_PREVIEW:"):
+                    events.put(json.loads(line.removeprefix("BUDGET_PREVIEW:")))
+        except Exception:
+            events.put(("error", "原本解析の結果を読み取れませんでした。"))
+        finally:
+            events.put(("end", None))
+
+    reader = threading.Thread(target=read_output, daemon=True, name="budget-preview-output")
+    try:
+        reader.start()
+        while True:
+            check_cancelled()
+            try:
+                kind, value = events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            check_cancelled()
+            if kind == "progress":
+                progress(str(value))
+            elif kind == "done":
+                process.wait(timeout=5)
+                check_cancelled()
+                if process.returncode != 0 or Path(value["path"]).resolve() != Path(source):
+                    raise ValueError("原本解析が正常に終了しませんでした。")
+                return SourcePreview(
+                    Path(value["path"]), value["source_type"], value["page_count"], value["preview_text"],
+                    tuple(ExtractedBudgetCandidate(**item) for item in value["candidates"]),
+                    tuple(value["warnings"]), value["source_sha256"],
+                )
+            elif kind == "error":
+                raise ValueError(str(value))
+            elif kind == "end":
+                raise ValueError("原本解析が完了前に終了しました。別の原本で再試行してください。")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        if reader.ident is not None:
+            reader.join(timeout=1)
+        process.stdout.close()
 
 
 def _parse_money(value: object) -> int | None:
@@ -815,7 +972,7 @@ def _candidates_from_table(
     return result, structurally_inferred
 
 
-def _preview_pdf(source: Path, *, page_number: int) -> SourcePreview:
+def _preview_pdf(source: Path, *, page_number: int, progress=lambda _text: None) -> SourcePreview:
     if page_number <= 0:
         raise ValueError("PDFのページ番号は1以上で指定してください。")
     try:
@@ -826,20 +983,27 @@ def _preview_pdf(source: Path, *, page_number: int) -> SourcePreview:
     warnings: list[str] = []
     candidates: list[ExtractedBudgetCandidate] = []
     used_structural_inference = False
+    progress(f"2/4 PDFの{page_number}ページ目を開いています")
     with pymupdf.open(source) as document:
         page_count = len(document)
         if page_number > page_count:
             raise ValueError(f"PDFは{page_count}ページです。{page_number}ページ目はありません。")
         page = document[page_number - 1]
         raw_text = page.get_text("text", sort=True).strip()
+        check_cancelled()
+        progress(f"3/4 {page_number}ページ目の罫線表を解析しています")
         try:
             tables = page.find_tables().tables
             for table_number, table in enumerate(tables, start=1):
+                check_cancelled()
+                progress(f"3/4 罫線表 {table_number}/{len(tables)} を読み取っています")
                 table_candidates, inferred = _candidates_from_table(
                     table.extract(), page_number, table_number
                 )
                 candidates.extend(table_candidates)
                 used_structural_inference = used_structural_inference or inferred
+        except OperationCancelled:
+            raise
         except Exception as exc:
             warnings.append(f"罫線表を読み取れませんでした: {exc}")
 
@@ -880,8 +1044,10 @@ def _preview_workbook(source: Path) -> SourcePreview:
     lines: list[str] = []
     try:
         for sheet in workbook.worksheets[:3]:
+            check_cancelled()
             lines.append(f"[{sheet.title}]")
             for row in sheet.iter_rows(min_row=1, max_row=80, max_col=20, values_only=True):
+                check_cancelled()
                 values = ["" if value is None else str(value) for value in row]
                 if any(values):
                     lines.append("\t".join(values).rstrip())

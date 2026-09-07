@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import hashlib
+import io
+import os
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +15,22 @@ from invoice_manager import db, repositories
 from invoice_manager.services.project_budget import (
     BudgetRowInput,
     ExtractedBudgetCandidate,
+    SourcePreview,
     build_project_forecast,
     get_project_budget,
     list_source_proposals,
     prepare_budget_rows_from_candidates,
     preview_source_document,
+    preview_source_document_isolated,
     resolve_budget_source,
     save_project_budget,
     suggest_budget_work_type_mappings,
+    _source_digest,
 )
 from invoice_manager.services.work_type_resolution import CanonicalWorkType
+from invoice_manager.services.operation_cancellation import (
+    CancellationToken, OperationCancelled, cancellation_scope,
+)
 
 
 class ProjectBudgetTests(unittest.TestCase):
@@ -229,6 +240,197 @@ class ProjectBudgetTests(unittest.TestCase):
             forecast = build_project_forecast(self.project_id)
         self.assertEqual(len(forecast), 1)
         self.assertEqual(forecast[0].projected_final_net, 150)
+
+    def test_isolated_pdf_parser_preserves_original_and_reports_real_stages(self) -> None:
+        source = self.make_table_pdf()
+        before = source.read_bytes()
+        updates = []
+        preview = preview_source_document_isolated(source, progress=updates.append)
+        self.assertEqual(preview.path, source)
+        self.assertTrue(preview.candidates)
+        self.assertEqual(preview.source_sha256, hashlib.sha256(before).hexdigest())
+        self.assertEqual(source.read_bytes(), before)
+        self.assertTrue(updates[0].startswith("1/4"))
+        self.assertTrue(any(text.startswith("3/4") for text in updates))
+        self.assertTrue(updates[-1].startswith("4/4"))
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_source_hash_is_chunked_and_observes_cancellation_between_reads(self) -> None:
+        token = CancellationToken()
+        sizes = []
+
+        class Stream(io.BytesIO):
+            def read(self, size=-1):
+                sizes.append(size)
+                token.request()
+                return super().read(size)
+
+        with patch.object(Path, "open", return_value=Stream(b"x" * (3 * 1024 * 1024))), cancellation_scope(token):
+            with self.assertRaises(OperationCancelled):
+                _source_digest(self.root / "synthetic.pdf")
+        self.assertEqual(sizes, [1024 * 1024])
+
+    def test_cancelling_isolated_parser_stops_owned_process_without_saving(self) -> None:
+        source = self.make_table_pdf()
+        token = CancellationToken()
+        processes = []
+        popen = subprocess.Popen
+
+        def launch(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with patch("invoice_manager.services.project_budget.subprocess.Popen", side_effect=launch), cancellation_scope(token):
+            with self.assertRaises(OperationCancelled):
+                preview_source_document_isolated(source, progress=lambda _text: token.request())
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertTrue(processes[0].stdout.closed)
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_changed_original_after_preview_is_not_saved(self) -> None:
+        source = self.make_table_pdf()
+        preview = preview_source_document(source)
+        source.write_bytes(source.read_bytes() + b"\n%changed\n")
+        with self.assertRaisesRegex(ValueError, "原本が変更"):
+            save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_source_copy_verifies_owned_temporary_bytes_before_publishing(self) -> None:
+        source = self.make_table_pdf()
+        before = source.read_bytes()
+        preview = preview_source_document(source)
+        copied = []
+        copy2 = shutil.copy2
+
+        def copy_to_temporary(src, destination):
+            copied.append(Path(destination))
+            self.assertTrue(Path(destination).name.startswith(".budget-copy-"))
+            self.assertEqual(Path(destination).parent, db.DATA_DIR / "budgets" / f"project-{self.project_id}")
+            return copy2(src, destination)
+
+        with patch("invoice_manager.services.project_budget.shutil.copy2", side_effect=copy_to_temporary):
+            saved = save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        stored = resolve_budget_source(saved.source_stored_path)
+        self.assertEqual(stored.read_bytes(), before)
+        self.assertEqual(saved.source_sha256, hashlib.sha256(before).hexdigest())
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(len(copied), 1)
+        self.assertFalse(copied[0].exists())
+        self.assertEqual(list(stored.parent.iterdir()), [stored])
+
+    def test_changed_copy_bytes_are_rejected_without_changing_database_or_original(self) -> None:
+        source = self.make_table_pdf()
+        preview = preview_source_document(source)
+        original = source.read_bytes()
+        database = db.DB_PATH.read_bytes()
+        copy2 = shutil.copy2
+
+        def changed_copy(src, destination):
+            copy2(src, destination)
+            with Path(destination).open("ab") as stream:
+                stream.write(b"\n%changed during copy\n")
+
+        with patch("invoice_manager.services.project_budget.shutil.copy2", side_effect=changed_copy):
+            with self.assertRaisesRegex(ValueError, "コピー中に予算原本が変更"):
+                save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(db.DB_PATH.read_bytes(), database)
+        self.assertFalse(list((db.DATA_DIR / "budgets").rglob("*.*")))
+
+    def test_corrupted_stored_original_is_not_reused_or_overwritten(self) -> None:
+        source = self.make_table_pdf()
+        preview = preview_source_document(source)
+        first = save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        destination = resolve_budget_source(first.source_stored_path)
+        destination.write_bytes(b"corrupted stored source")
+        corrupted = destination.read_bytes()
+        original, database = source.read_bytes(), db.DB_PATH.read_bytes()
+        with patch("invoice_manager.services.project_budget.shutil.copy2") as copy:
+            with self.assertRaisesRegex(ValueError, "保存済み予算原本の内容が一致"):
+                save_project_budget(self.project_id, [self.row(budget_net=2000)], source_preview=preview, confirmed=True)
+        copy.assert_not_called()
+        self.assertEqual(destination.read_bytes(), corrupted)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(db.DB_PATH.read_bytes(), database)
+
+    def test_cancel_after_copy_removes_temporary_and_preserves_database(self) -> None:
+        source = self.make_table_pdf()
+        preview = preview_source_document(source)
+        original, database = source.read_bytes(), db.DB_PATH.read_bytes()
+        token = CancellationToken()
+        copy2 = shutil.copy2
+
+        def copy_then_cancel(src, destination):
+            copy2(src, destination)
+            token.request()
+
+        with patch("invoice_manager.services.project_budget.shutil.copy2", side_effect=copy_then_cancel), cancellation_scope(token):
+            with self.assertRaises(OperationCancelled):
+                save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(db.DB_PATH.read_bytes(), database)
+        self.assertFalse(list((db.DATA_DIR / "budgets").rglob("*.*")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows non-overwriting rename")
+    def test_destination_created_during_publish_is_not_overwritten(self) -> None:
+        source = self.make_table_pdf()
+        preview = preview_source_document(source)
+        original, database = source.read_bytes(), db.DB_PATH.read_bytes()
+        rename = os.rename
+        destinations = []
+
+        def race(src, destination):
+            destinations.append(Path(destination))
+            Path(destination).write_bytes(b"another saved original")
+            return rename(src, destination)
+
+        with patch("invoice_manager.services.project_budget.os.rename", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "保存済み予算原本の内容が一致"):
+                save_project_budget(self.project_id, [self.row()], source_preview=preview, confirmed=True)
+        self.assertEqual(destinations[0].read_bytes(), b"another saved original")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(db.DB_PATH.read_bytes(), database)
+        self.assertFalse(list(destinations[0].parent.glob(".budget-copy-*")))
+
+    def test_isolated_parser_error_is_reported_and_can_be_retried(self) -> None:
+        source = self.make_table_pdf()
+        with self.assertRaisesRegex(ValueError, "ページ"):
+            preview_source_document_isolated(source, page_number=99)
+        self.assertEqual(preview_source_document_isolated(source).page_count, 2)
+
+    def test_new_source_does_not_reassign_saved_rows_original_proposal(self) -> None:
+        source = self.make_table_pdf()
+        first_candidate = self.candidate("FIRST")
+        first_preview = SourcePreview(source, "pdf", 2, "", (first_candidate,), ())
+        first = save_project_budget(
+            self.project_id, [self.row("FIRST", source_candidate=first_candidate)],
+            source_preview=first_preview, confirmed=True,
+        )
+        second_source = self.root / "second.pdf"
+        second_source.write_bytes(source.read_bytes() + b"\n%second\n")
+        second_candidate = self.candidate("SECOND")
+        second_preview = SourcePreview(second_source, "pdf", 2, "", (second_candidate,), ())
+        saved = save_project_budget(self.project_id, [
+            self.row("FIRST", row_id=first.rows[0].id, source_candidate=first_candidate),
+            self.row("SECOND", source_candidate=second_candidate),
+        ], source_preview=second_preview, confirmed=True)
+        self.assertEqual(saved.rows[0].source_proposal_id, first.rows[0].source_proposal_id)
+        self.assertEqual(saved.rows[0].source_candidate_json, first.rows[0].source_candidate_json)
+        self.assertNotEqual(saved.rows[0].source_proposal_id, saved.rows[1].source_proposal_id)
+
+    def test_unsaved_candidate_from_different_source_rolls_back_entire_budget(self) -> None:
+        source = self.make_table_pdf()
+        candidate = self.candidate("ACTUAL")
+        preview = SourcePreview(source, "pdf", 2, "", (candidate,), ())
+        with self.assertRaisesRegex(ValueError, "別の予算原本"):
+            save_project_budget(self.project_id, [
+                self.row("ACTUAL", source_candidate=candidate),
+                self.row("OTHER", source_candidate=self.candidate("OTHER")),
+            ], source_preview=preview, confirmed=True)
+        self.assertIsNone(get_project_budget(self.project_id))
+        self.assertFalse(list_source_proposals(self.project_id))
 
     def test_save_requires_explicit_confirmation_and_rejects_duplicate_codes(self) -> None:
         with self.assertRaisesRegex(ValueError, "確認"):

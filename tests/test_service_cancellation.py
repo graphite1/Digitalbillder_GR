@@ -77,6 +77,9 @@ class ServiceCancellationTests(unittest.TestCase):
         stack.enter_context(patch.object(sync, "download_csv", return_value=self.root / "mock.csv"))
         stack.enter_context(patch.object(sync, "validate_rows", return_value=[row]))
         stack.enter_context(patch.object(sync, "list_candidates", return_value=[row]))
+        stack.enter_context(patch.object(sync, "check_duplicates", return_value=SimpleNamespace(
+            existing_skip_ids=set(), update_candidate_ids=set(), duplicate_candidate_ids=set(),
+        )))
         stack.enter_context(patch.object(sync, "write_selected_csv"))
         return stack
 

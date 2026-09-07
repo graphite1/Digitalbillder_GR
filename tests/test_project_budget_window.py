@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +85,202 @@ class ProjectBudgetWindowTests(unittest.TestCase):
         self.window.source_preview = preview
         self.window.source_path = self.pdf_path
         self.window._show_candidates(preview)
+
+    def pump_until(self, condition, timeout=5) -> None:
+        deadline = time.monotonic() + timeout
+        while not condition():
+            self.tk_root.update()
+            if time.monotonic() >= deadline:
+                self.fail("Background preview did not finish in time")
+            time.sleep(0.01)
+        self.tk_root.update()
+
+    def result_preview(self, code="READ"):
+        return SourcePreview(self.pdf_path, "pdf", 2, "", (self.candidate(code),), ())
+
+    def test_source_worker_keeps_ui_responsive_and_reports_only_completed_result(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        gui_thread = threading.get_ident()
+        result = self.result_preview()
+        calls = []
+
+        def parse(path, *, page_number, progress):
+            calls.append(threading.get_ident())
+            progress("3/4 罫線表 1/2 を読み取っています")
+            entered.set()
+            release.wait(3)
+            return result
+
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated", side_effect=parse):
+            try:
+                self.assertTrue(self.window._start_source_preview(self.pdf_path))
+                self.pump_until(entered.is_set)
+                self.pump_until(lambda: "1/2" in self.window.source_activity.message)
+                self.assertNotEqual(calls[0], gui_thread)
+                heartbeat = []
+                self.tk_root.after(0, lambda: heartbeat.append(True))
+                self.pump_until(lambda: bool(heartbeat))
+                self.assertTrue(self.window.source_busy)
+                self.assertEqual(str(self.window.save_button["state"]), "disabled")
+                self.assertFalse(self.window._start_source_preview(self.pdf_path))
+                self.assertIsNone(self.window.source_preview)
+            finally:
+                release.set()
+                self.pump_until(lambda: not self.window.source_busy)
+        self.assertIs(self.window.source_preview, result)
+        self.assertFalse(self.window.source_activity.failed)
+        self.assertEqual(str(self.window.save_button["state"]), "normal")
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_cancel_after_result_is_queued_discards_it_and_retry_uses_new_token(self) -> None:
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated",
+                   return_value=self.result_preview()):
+            self.window._start_source_preview(self.pdf_path)
+            self.window._source_thread.join(timeout=2)
+            first_token = self.window._source_token
+            self.window.source_activity.request_cancel()
+            self.pump_until(lambda: not self.window.source_busy)
+            self.assertTrue(self.window.source_activity.cancelled)
+            self.assertIsNone(self.window.source_preview)
+            self.window._start_source_preview(self.pdf_path)
+            self.pump_until(lambda: not self.window.source_busy)
+        self.assertIsNot(first_token, self.window._source_token)
+        self.assertIsNotNone(self.window.source_preview)
+
+    def test_project_switch_discards_old_result_and_late_events_do_not_finish_new_job(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        other = repositories.get_or_create_project("OTHER-BUDGET", "別工事")
+        self.window.project_options["別工事"] = other
+
+        def parse(*_args, **_kwargs):
+            entered.set()
+            release.wait(3)
+            return self.result_preview()
+
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated", side_effect=parse):
+            try:
+                self.window._start_source_preview(self.pdf_path)
+                old_generation = self.window._source_job_generation
+                self.pump_until(entered.is_set)
+                self.window.project_var.set("別工事")
+                self.window._project_changed()
+                self.assertTrue(self.window._source_token.requested)
+            finally:
+                release.set()
+                self.pump_until(lambda: not self.window.source_busy)
+            self.assertIsNone(self.window.source_preview)
+            self.assertFalse(self.window.candidate_values)
+            release.clear()
+            self.window._start_source_preview(self.pdf_path)
+            self.window._source_events.put((old_generation, self.project_id, "done", self.result_preview("OLD")))
+            try:
+                self.pump_until(self.window._source_events.empty)
+                self.assertTrue(self.window.source_busy)
+                self.assertIsNone(self.window.source_preview)
+            finally:
+                release.set()
+                self.pump_until(lambda: not self.window.source_busy)
+
+    def test_close_requests_cancel_and_waits_for_worker_before_destroy(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        def parse(*_args, **_kwargs):
+            entered.set()
+            release.wait(3)
+            return self.result_preview()
+
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated", side_effect=parse):
+            try:
+                self.window._start_source_preview(self.pdf_path)
+                self.pump_until(entered.is_set)
+                self.window.close()
+                self.assertTrue(self.window.winfo_exists())
+                self.assertTrue(self.window.source_busy)
+                self.assertTrue(self.window.source_activity.running)
+                self.assertTrue(self.window._source_token.requested)
+            finally:
+                release.set()
+                self.pump_until(lambda: not self.window.source_busy)
+        self.assertFalse(self.window.winfo_exists())
+        self.assertTrue(self.window.source_activity.cancelled)
+
+    def test_parser_failure_keeps_previous_preview_and_restores_controls(self) -> None:
+        self.show_candidates(self.candidate("PREVIOUS"))
+        old = self.window.source_preview
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated",
+                   side_effect=ValueError("PDFを読み取れません")):
+            self.window._start_source_preview(self.pdf_path)
+            self.pump_until(lambda: not self.window.source_busy)
+        self.assertIs(self.window.source_preview, old)
+        self.assertTrue(self.window.source_activity.failed)
+        self.assertIn("PDFを読み取れません", self.window.batch_status_var.get())
+        self.assertEqual(str(self.window.source_button["state"]), "normal")
+
+    def test_candidate_render_failure_keeps_old_source_and_old_candidates_together(self) -> None:
+        old = self.result_preview("OLD")
+        self.window._apply_source_preview(old)
+        previous_items = self.window.candidate_tree.get_children()
+        previous_values = dict(self.window.candidate_values)
+        new = SourcePreview(self.root_path / "new.pdf", "pdf", 2, "",
+                            (self.candidate("NEW-1"), self.candidate("NEW-2")), ())
+        insert = self.window.candidate_tree.insert
+        calls = []
+
+        def fail_second(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise ValueError("render failed")
+            return insert(*args, **kwargs)
+
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated", return_value=new), \
+                patch.object(self.window.candidate_tree, "insert", side_effect=fail_second):
+            self.window._start_source_preview(new.path)
+            self.pump_until(lambda: not self.window.source_busy)
+        self.assertIs(self.window.source_preview, old)
+        self.assertEqual(self.window.source_path, old.path)
+        self.assertEqual(self.window.source_var.get(), old.path.name)
+        self.assertEqual(self.window.candidate_tree.get_children(), previous_items)
+        self.assertEqual(self.window.candidate_values, previous_values)
+        self.assertTrue(self.window.source_activity.failed)
+
+    def test_direct_window_destruction_cancels_worker_without_tk_calls_from_thread(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        def parse(*_args, **_kwargs):
+            entered.set()
+            release.wait(3)
+            raise RuntimeError("Stopped while owner was destroyed")
+
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated", side_effect=parse):
+            try:
+                self.window._start_source_preview(self.pdf_path)
+                self.pump_until(entered.is_set)
+                self.window.destroy()
+                self.assertTrue(self.window._source_token.requested)
+            finally:
+                release.set()
+                self.pump_until(lambda: not self.window.source_busy)
+        self.assertTrue(self.window.source_activity.cancelled)
+        self.assertFalse(self.window.source_activity.failed)
+        self.assertIsNone(self.window._source_poll_id)
+
+    def test_thread_start_failure_does_not_leave_busy_state(self) -> None:
+        with patch("invoice_manager.ui.project_budget_window.threading.Thread.start", side_effect=RuntimeError("cannot start")):
+            self.assertFalse(self.window._start_source_preview(self.pdf_path))
+        self.assertFalse(self.window.source_busy)
+        self.assertFalse(self.window.source_activity.running)
+        self.assertTrue(self.window.source_activity.failed)
+        self.assertEqual(str(self.window.save_button["state"]), "normal")
+        self.assertIsNone(self.window._source_poll_id)
+
+    def test_unpersisted_pdf_rows_prevent_mixing_another_source(self) -> None:
+        self.show_candidates(self.candidate("UNSAVED"))
+        self.window._add_all_candidates()
+        with patch("invoice_manager.ui.project_budget_window.preview_source_document_isolated") as parse:
+            self.assertFalse(self.window._start_source_preview(self.pdf_path))
+        parse.assert_not_called()
+        self.assertEqual(next(iter(self.window.row_values.values()))["work_type_code"], "UNSAVED")
+        self.assertIn("未保存", self.window.batch_status_var.get())
 
     def test_bulk_add_is_local_until_save_and_keeps_manual_values_on_readd(self) -> None:
         first = self.candidate("NEW-A", budget=1200, scheduled=1100, location="表1 行2")

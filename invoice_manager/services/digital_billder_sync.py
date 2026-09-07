@@ -16,6 +16,7 @@ from invoice_manager.services.digital_billder_download import download_csv, expo
 from invoice_manager.services.selected_invoice_download import download_selected_zip
 from invoice_manager.services.import_service import execute_import, preview_import
 from invoice_manager.services.operation_cancellation import check_cancelled, begin_commit
+from invoice_manager.services.duplicate_checker import check_duplicates
 
 SYNC_LOCK = Lock()
 
@@ -139,6 +140,19 @@ def import_selected(ids: set[str], progress=lambda text: None):
                     check_cancelled()
                     if current_by_id[invoice_id].raw_data != pending_by_id[invoice_id].raw_data:
                         raise ValueError("確認後に請求内容が変わりました。新着確認をやり直してください。")
+                selected_rows = [current_by_id[invoice_id] for invoice_id in sorted(ids)]
+                duplicate_summary = check_duplicates(selected_rows)
+                duplicate_ids = (
+                    duplicate_summary.existing_skip_ids
+                    | duplicate_summary.update_candidate_ids
+                    | duplicate_summary.duplicate_candidate_ids
+                ) & ids
+                if duplicate_ids:
+                    raise ValueError(
+                        "選択した請求に、工事・会社・請求日・金額が一致する別IDの重複候補、"
+                        "既存請求、または更新候補が含まれます。重複確定ではないため、"
+                        "手動取込で内容を確認してください。"
+                    )
                 progress("選択した未取込請求のPDFを取得しています…")
                 zip_path = download_selected_zip(page, folder / "invoices.zip", current, ids, progress)
                 check_cancelled()

@@ -95,6 +95,42 @@ class DigitalBillderSyncTests(unittest.TestCase):
             sync.import_selected({"one"})
         self.assertEqual(downloader.call_args.args[3], {"one"})
 
+    def test_same_batch_duplicates_are_rejected_before_pdf_download_when_both_selected(self):
+        self.rows = [make_row("one"), make_row("two")]
+        sync.remember_candidates(self.rows)
+        with (
+            patch.object(sync, "export_session", return_value=nullcontext(object())),
+            patch.object(sync, "download_csv", side_effect=self.fake_csv),
+            patch.object(sync, "download_selected_zip", side_effect=self.fake_zip) as downloader,
+        ):
+            with self.assertRaisesRegex(ValueError, "工事・会社・請求日・金額が一致する別IDの重複候補"):
+                sync.import_selected({"one", "two"})
+        downloader.assert_not_called()
+        self.assertEqual(self.candidate_ids(), {"one", "two"})
+
+    def test_selected_invoice_can_be_imported_when_matching_id_is_unselected(self):
+        self.rows = [make_row("one"), make_row("two")]
+        sync.remember_candidates(self.rows)
+        with (
+            patch.object(sync, "export_session", return_value=nullcontext(object())),
+            patch.object(sync, "download_csv", side_effect=self.fake_csv),
+            patch.object(sync, "download_selected_zip", side_effect=self.fake_zip) as downloader,
+        ):
+            result = sync.import_selected({"one"})
+        self.assertEqual(result.inserted_count, 1)
+        self.assertEqual(downloader.call_args.args[3], {"one"})
+        self.assertEqual(self.candidate_ids(), {"two"})
+
+        with (
+            patch.object(sync, "export_session", return_value=nullcontext(object())),
+            patch.object(sync, "download_csv", side_effect=self.fake_csv),
+            patch.object(sync, "download_selected_zip") as downloader,
+        ):
+            with self.assertRaisesRegex(ValueError, "重複候補"):
+                sync.import_selected({"two"})
+        downloader.assert_not_called()
+        self.assertEqual(self.candidate_ids(), {"two"})
+
     def test_imported_invoice_cannot_be_selected_again(self):
         batch = repositories.create_import_batch("2026-08", Path("x.csv"), Path("x.zip"), "", "", "")
         repositories.insert_invoice(self.rows[0], "2026-08", batch)

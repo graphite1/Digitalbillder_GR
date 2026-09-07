@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -20,10 +22,14 @@ from invoice_manager.services.project_budget import (
     build_project_forecast,
     get_project_budget,
     prepare_budget_rows_from_candidates,
-    preview_source_document,
+    preview_source_document_isolated,
     resolve_budget_source,
     save_project_budget,
     suggest_budget_work_type_mappings,
+)
+from invoice_manager.ui.background_activity import ActivityPanel, BackgroundActivity
+from invoice_manager.services.operation_cancellation import (
+    CancellationToken, OperationCancelled, cancellation_scope, check_cancelled,
 )
 
 
@@ -61,6 +67,14 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.source_preview: SourcePreview | None = None
         self.source_path: Path | None = None
         self.stored_source_path: Path | None = None
+        self.source_busy = False
+        self._source_generation = 0
+        self._source_events = queue.Queue()
+        self._source_poll_id = None
+        self._source_destroyed = False
+        self._close_after_source = False
+        self._source_token = None
+        self.source_activity = BackgroundActivity(self, "予算原本の読取")
 
         self.project_var = tk.StringVar()
         self.source_var = tk.StringVar(value="原本未選択")
@@ -78,6 +92,8 @@ class ProjectBudgetWindow(tk.Toplevel):
         self._load_projects(project_id)
         self._build()
         self._project_changed()
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<Destroy>", self._on_source_destroy, add=True)
 
     def _load_projects(self, initial_project_id: int | None) -> None:
         for row in list_projects():
@@ -100,7 +116,8 @@ class ProjectBudgetWindow(tk.Toplevel):
         )
         project_combo.pack(side=tk.LEFT, padx=(6, 14))
         project_combo.bind("<<ComboboxSelected>>", lambda _event: self._project_changed())
-        ttk.Button(top, text="PDF原本を確認", command=self._choose_source).pack(side=tk.LEFT, padx=3)
+        self.source_button = ttk.Button(top, text="PDF原本を確認", command=self._choose_source)
+        self.source_button.pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="原本を開く", command=self._open_source).pack(side=tk.LEFT, padx=3)
         ttk.Label(top, textvariable=self.source_var).pack(side=tk.LEFT, padx=8)
 
@@ -108,6 +125,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         source_frame.grid(row=1, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
         source_frame.columnconfigure(0, weight=1)
         source_table = ttk.Frame(source_frame)
+        self.source_table = source_table
         source_table.grid(row=0, column=0, sticky=tk.NSEW)
         self.candidate_tree = ttk.Treeview(
             source_table,
@@ -134,7 +152,12 @@ class ProjectBudgetWindow(tk.Toplevel):
         ttk.Button(source_actions, text="全候補を予算行へ追加", command=self._add_all_candidates).pack(fill=tk.X, pady=2)
         ttk.Button(source_actions, text="選択候補をまとめて追加", command=self._add_selected_candidates).pack(fill=tk.X, pady=2)
         ttk.Button(source_actions, text="選択候補を編集", command=self._candidate_to_form).pack(fill=tk.X, pady=2)
-        ttk.Label(self, textvariable=self.batch_status_var, padding=(8, 0, 8, 6), wraplength=950).grid(row=2, column=0, sticky=tk.EW)
+        status_frame = ttk.Frame(self)
+        status_frame.grid(row=2, column=0, sticky=tk.EW)
+        self.source_panel = ActivityPanel(source_frame, activity=self.source_activity)
+        self.source_panel.grid(row=0, column=0, sticky=tk.EW)
+        self.source_panel.grid_remove()
+        ttk.Label(status_frame, textvariable=self.batch_status_var, padding=(8, 0, 8, 6), wraplength=950).pack(fill=tk.X)
         editor = ttk.LabelFrame(self, text="登録行の編集", padding=7)
         editor.grid(row=3, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
         for column in range(6):
@@ -225,13 +248,17 @@ class ProjectBudgetWindow(tk.Toplevel):
         ttk.Label(bottom, text="メモ").pack(side=tk.LEFT)
         self.note_entry = ttk.Entry(bottom)
         self.note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
-        ttk.Button(bottom, text="予算を保存", command=self._save).pack(side=tk.RIGHT, padx=3)
+        self.save_button = ttk.Button(bottom, text="予算を保存", command=self._save)
+        self.save_button.pack(side=tk.RIGHT, padx=3)
         ttk.Button(bottom, text="見込を再表示", command=self._refresh_forecast).pack(side=tk.RIGHT, padx=3)
 
     def _project_id(self) -> int | None:
         return self.project_options.get(self.project_var.get())
 
     def _project_changed(self) -> None:
+        self._source_generation += 1
+        if self.source_busy and self._source_token is not None:
+            self.source_activity.request_cancel()
         self.row_values.clear()
         self.row_tree.delete(*self.row_tree.get_children())
         self.candidate_tree.delete(*self.candidate_tree.get_children())
@@ -291,37 +318,146 @@ class ProjectBudgetWindow(tk.Toplevel):
             return None
 
     def _choose_source(self) -> None:
+        if self.source_busy:
+            return
         path = filedialog.askopenfilename(
             parent=self, title="実行予算原本を選択",
             filetypes=(("PDF", "*.pdf"), ("Excel", "*.xlsx *.xlsm"), ("すべて", "*.*")),
         )
         if not path:
             return
+        self._start_source_preview(path)
+
+    def _start_source_preview(self, path: str | Path) -> bool:
+        if self.source_busy or self._source_destroyed or self._project_id() is None:
+            return False
+        if (any(row.get("row_id") is None and row.get("source_candidate") is not None for row in self.row_values.values())
+                or (self.active_candidate is not None and self.editing_item is None)):
+            self.batch_status_var.set("原本から追加・編集中の未保存行があります。保存するか不要な行・入力を外してから原本を読み直してください。")
+            return False
+        self._source_generation += 1
+        generation, project_id = self._source_generation, self._project_id()
+        self._source_job_generation = generation
+        self.source_busy = True
+        token = self._source_token = CancellationToken()
+        self.source_button.configure(state=tk.DISABLED)
+        self.save_button.configure(state=tk.DISABLED)
+        self.source_activity.title = f"予算原本の読取：{self.project_var.get()}"
+        self.source_activity.start("原本解析を開始しています。ほかの画面も操作できます。", cancellation=token)
+        self.source_table.grid_remove()
+        self.source_panel.grid()
+
+        def progress(text):
+            check_cancelled()
+            self._source_events.put((generation, project_id, "progress", str(text)))
+
+        def work():
+            try:
+                with cancellation_scope(token):
+                    result = preview_source_document_isolated(path, page_number=2, progress=progress)
+                    check_cancelled()
+                self._source_events.put((generation, project_id, "done", result))
+            except Exception as exc:
+                kind = "cancelled" if token.requested or isinstance(exc, OperationCancelled) else "error"
+                self._source_events.put((generation, project_id, kind, str(exc)))
+
         try:
-            preview = preview_source_document(path, page_number=2)
+            self._source_thread = threading.Thread(target=work, daemon=False, name="budget-source-preview")
+            self._source_thread.start()
         except Exception as exc:
-            messagebox.showerror("原本読取エラー", str(exc), parent=self)
-            return
+            self.source_busy = False
+            self.source_activity.finish("原本解析を開始できませんでした。もう一度実行してください。", failed=True)
+            self.source_button.configure(state=tk.NORMAL)
+            self.save_button.configure(state=tk.NORMAL)
+            self.batch_status_var.set(self.source_activity.message)
+            self.source_panel.grid_remove()
+            self.source_table.grid()
+            return False
+        self._source_poll_id = self._root().after(100, self._poll_source_preview)
+        return True
+
+    def _poll_source_preview(self) -> None:
+        self._source_poll_id = None
+        try:
+            while True:
+                generation, project_id, kind, value = self._source_events.get_nowait()
+                if generation != self._source_job_generation:
+                    continue
+                current = (not self._source_destroyed and generation == self._source_generation
+                           and project_id == self._project_id())
+                if kind == "progress":
+                    if current:
+                        self.source_activity.update(value)
+                    continue
+                self.source_busy = False
+                cancelled = kind == "cancelled" or self._source_token.requested or not current
+                message = ("原本読取を中断しました。読取結果は反映していません。" if cancelled else
+                           str(value) if kind == "error" else f"原本読取完了：{len(value.candidates)}件（未保存）")
+                if not cancelled and kind == "done":
+                    try:
+                        self._apply_source_preview(value)
+                    except Exception as exc:
+                        kind, message = "error", f"読取結果を表示できませんでした: {exc}"
+                self.source_activity.finish(message, failed=kind == "error" and not cancelled, cancelled=cancelled)
+                if not self._source_destroyed:
+                    self.source_button.configure(state=tk.NORMAL)
+                    self.save_button.configure(state=tk.NORMAL)
+                    self.source_panel.grid_remove()
+                    self.source_table.grid()
+                    if current and (cancelled or kind == "error"):
+                        self.batch_status_var.set(message)
+                    if self._close_after_source:
+                        self.destroy()
+        except queue.Empty:
+            pass
+        if self.source_busy:
+            self._source_poll_id = self._root().after(100, self._poll_source_preview)
+
+    def _apply_source_preview(self, preview: SourcePreview) -> None:
+        self._show_candidates(preview)
         self.source_preview = preview
         self.source_path = preview.path
         self.source_var.set(preview.path.name)
-        self._show_candidates(preview)
         self.batch_status_var.set(f"{len(preview.candidates)}件を抽出しました。まとめて追加後、集計対象を選んで保存できます。")
         if preview.warnings:
-            messagebox.showwarning("抽出候補の確認", "\n".join(preview.warnings), parent=self)
+            self.batch_status_var.set(self.batch_status_var.get() + "\n" + "\n".join(preview.warnings))
+
+    def close(self) -> None:
+        if self.source_busy:
+            self._close_after_source = True
+            self.source_activity.request_cancel()
+            self.withdraw()
+        else:
+            self.destroy()
+
+    def _on_source_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        self._source_destroyed = True
+        self._source_generation += 1
+        if self.source_busy:
+            self.source_activity.request_cancel()
 
     def _show_candidates(self, preview: SourcePreview) -> None:
-        self.candidate_tree.delete(*self.candidate_tree.get_children())
-        self.candidate_values.clear()
+        prepared = []
         for candidate in preview.candidates:
             name = candidate.work_type_name or self._master_name(candidate.work_type_code) or "（名称要確認）"
-            item = self.candidate_tree.insert(
-                "", tk.END,
-                values=(candidate.work_type_code, name, _amount_text(candidate.budget_net),
+            prepared.append((candidate, (candidate.work_type_code, name, _amount_text(candidate.budget_net),
                         _amount_text(candidate.scheduled_net),
-                        f"{candidate.source_location} / {candidate.aggregation_hint}"),
-            )
-            self.candidate_values[item] = candidate
+                        f"{candidate.source_location} / {candidate.aggregation_hint}")))
+        previous = self.candidate_tree.get_children()
+        added = {}
+        try:
+            for candidate, values in prepared:
+                item = self.candidate_tree.insert("", tk.END, values=values)
+                added[item] = candidate
+            self.candidate_tree.delete(*previous)
+        except Exception:
+            if added:
+                self.candidate_tree.delete(*added)
+            raise
+        self.candidate_values.clear()
+        self.candidate_values.update(added)
 
     def _add_all_candidates(self) -> None:
         self._add_candidates(self.candidate_tree.get_children())
@@ -331,6 +467,8 @@ class ProjectBudgetWindow(tk.Toplevel):
         self._add_candidates(tuple(item for item in self.candidate_tree.get_children() if item in selected))
 
     def _add_candidates(self, items) -> None:
+        if self.source_busy:
+            return
         if not items:
             messagebox.showinfo("抽出候補", "PDFの抽出候補を確認し、追加する候補を選択してください。", parent=self)
             return
@@ -429,6 +567,8 @@ class ProjectBudgetWindow(tk.Toplevel):
             return ""
 
     def _candidate_to_form(self) -> None:
+        if self.source_busy:
+            return
         selection = self.candidate_tree.selection()
         if not selection:
             return
@@ -474,6 +614,8 @@ class ProjectBudgetWindow(tk.Toplevel):
         return resolve_work_type_code(project_id, code).code
 
     def _apply_row(self) -> None:
+        if self.source_busy:
+            return
         try:
             code = self.code_var.get().strip()
             name = self.name_var.get().strip()
@@ -556,6 +698,8 @@ class ProjectBudgetWindow(tk.Toplevel):
         self._set_original_label(None)
 
     def _save(self) -> None:
+        if self.source_busy:
+            return
         project_id = self._project_id()
         if project_id is None:
             return

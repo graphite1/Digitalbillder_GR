@@ -46,7 +46,7 @@ class SelectedInvoiceDownloadTests(unittest.TestCase):
                 archive.writestr(archive_name, content)
         return path
 
-    def fake_page(self, page_sizes):
+    def fake_page(self, page_sizes, *, delayed_sizes=None, header_delay=0):
         class Box:
             def __init__(self, page, index):
                 self.page, self.index = page, index
@@ -56,7 +56,15 @@ class SelectedInvoiceDownloadTests(unittest.TestCase):
                 return self
 
             def click(self):
-                self.page.states[self.page.page_index][self.index] = True
+                states = self.page.current_states()
+                if self.index == 0:
+                    self.page.header_clicks[self.page.page_index] += 1
+                    self.page.header_pending[self.page.page_index] = not states[0]
+                    self.page.header_polls[self.page.page_index] = 0
+                else:
+                    self.page.row_clicks[self.page.page_index] += 1
+                    states[self.index] = not states[self.index]
+                    states[0] = all(states[1:])
 
             def is_checked(self):
                 return self.page.states[self.page.page_index][self.index]
@@ -76,7 +84,8 @@ class SelectedInvoiceDownloadTests(unittest.TestCase):
                 self.page = page
 
             def evaluate_all(self, _script):
-                return self.page.states[self.page.page_index]
+                self.page.poll_page()
+                return list(self.page.current_states())
 
             def nth(self, index):
                 return Box(self.page, index)
@@ -96,7 +105,32 @@ class SelectedInvoiceDownloadTests(unittest.TestCase):
             def __init__(self):
                 self.page_index = 0
                 self.states = [[False] * size for size in page_sizes]
+                self.original_sizes = list(page_sizes)
+                self.delayed_sizes = dict(delayed_sizes or {})
+                self.page_polls = [0] * len(page_sizes)
+                self.header_clicks = [0] * len(page_sizes)
+                self.row_clicks = [0] * len(page_sizes)
+                self.header_pending = [None] * len(page_sizes)
+                self.header_polls = [0] * len(page_sizes)
+                self.header_delay = header_delay
                 self.url = selected.APPLICATIONS_URL
+
+            def current_states(self):
+                return self.states[self.page_index]
+
+            def poll_page(self):
+                index = self.page_index
+                self.page_polls[index] += 1
+                delayed = self.delayed_sizes.get(index)
+                if delayed and self.page_polls[index] >= delayed[0] and len(self.states[index]) != delayed[1]:
+                    self.states[index] = [False] * delayed[1]
+                pending = self.header_pending[index]
+                if pending is not None:
+                    self.header_polls[index] += 1
+                    if self.header_polls[index] > self.header_delay:
+                        self.states[index][1:] = [pending] * (len(self.states[index]) - 1)
+                        self.states[index][0] = pending
+                        self.header_pending[index] = None
 
             def assertEqual(self, actual, expected):
                 if actual != expected:
@@ -144,11 +178,92 @@ class SelectedInvoiceDownloadTests(unittest.TestCase):
         with ZipFile(destination) as archive:
             self.assertEqual(set(archive.namelist()), {"invoices/first/invoice.pdf", "invoices/second/invoice.pdf"})
 
+    def test_all_eighty_one_rows_use_one_header_selection_per_page_and_clear_before_next(self):
+        rows = [row(f"id-{index}") for index in range(81)]
+        page = self.fake_page([51, 32])
+        destination = self.root / "all.zip"
+        downloads = []
+
+        def download_page(_page, part, expected):
+            downloads.append(len(expected))
+            with ZipFile(part, "w") as archive:
+                for item in expected:
+                    archive.writestr(f"invoices/{item.external_id}/invoice.pdf", b"pdf")
+
+        with patch.object(selected, "_close_export"), patch.object(selected, "_download_page", side_effect=download_page), \
+             patch.object(selected, "wait_for_network_idle"):
+            selected.download_selected_zip(page, destination, rows, {item.external_id for item in rows})
+        self.assertEqual(downloads, [50, 31])
+        self.assertEqual(page.header_clicks, [2, 1])
+        self.assertEqual(page.row_clicks, [0, 0])
+
+    def test_selection_snapshot_is_a_copy_before_page_state_changes(self):
+        page = self.fake_page([3])
+        snapshot = selected._selection(page)
+        page.states[0][1] = True
+        self.assertEqual(snapshot, [False, False, False])
+
     def test_first_page_without_target_is_skipped_without_pdf_download(self):
         downloads, destination = self.run_two_page_download({"second"})
         self.assertEqual(downloads, [["second"]])
         with ZipFile(destination) as archive:
             self.assertEqual(archive.namelist(), ["invoices/second/invoice.pdf"])
+
+    def test_old_fifty_row_page_waits_for_new_thirty_one_row_page(self):
+        rows = [row(f"id-{index}") for index in range(81)]
+        page = self.fake_page([51, 51], delayed_sizes={1: (2, 32)})
+        destination = self.root / "delayed.zip"
+        downloads = []
+
+        def download_page(_page, part, expected):
+            downloads.append([item.external_id for item in expected])
+            with ZipFile(part, "w") as archive:
+                for item in expected:
+                    archive.writestr(f"invoices/{item.external_id}/invoice.pdf", b"pdf")
+
+        with patch.object(selected, "_close_export"), patch.object(selected, "_download_page", side_effect=download_page), \
+             patch.object(selected, "wait_for_network_idle"):
+            selected.download_selected_zip(page, destination, rows, {"id-80"})
+        self.assertEqual(downloads, [["id-80"]])
+
+    def test_delayed_header_clear_does_not_click_again_while_state_is_unchanged(self):
+        page = self.fake_page([4], header_delay=2)
+        page.states[0] = [False, True, False, False]
+        selected._clear_page_selection(page, [True, False, False])
+        self.assertEqual(page.header_clicks, [2])
+        self.assertEqual(page.current_states(), [False, False, False, False])
+
+    def test_rows_that_never_reach_expected_count_timeout(self):
+        page = self.fake_page([3])
+        with patch.object(selected.time, "monotonic", side_effect=[0, 31]):
+            with self.assertRaisesRegex(selected.DownloadError, "ページ更新が完了しません"):
+                selected._wait_rows(page, total=4, expected_count=3)
+
+    def test_initial_short_render_is_rechecked_until_fifty_rows_stabilize(self):
+        page = self.fake_page([3], delayed_sizes={0: (2, 51)})
+        selected._wait_rows(page, total=81)
+        self.assertEqual(len(selected._selection(page)), 51)
+
+    def test_selection_clear_honors_cancellation(self):
+        page = self.fake_page([3])
+        page.states[0] = [False, True, False]
+        token = CancellationToken()
+        with cancellation_scope(token):
+            token.request()
+            with self.assertRaises(OperationCancelled):
+                selected._clear_page_selection(page, [True, False])
+        self.assertEqual(page.header_clicks, [0])
+
+    def test_selection_clear_rejects_url_escape_and_row_count_change(self):
+        page = self.fake_page([3])
+        page.url = "https://purchases.digitalbillder.com/other"
+        with self.assertRaisesRegex(selected.DownloadError, "一覧から移動"):
+            selected._selection(page)
+        page.url = selected.APPLICATIONS_URL
+        page = self.fake_page([2], delayed_sizes={0: (3, 3)})
+        page.states[0] = [False, True]
+        with self.assertRaisesRegex(selected.DownloadError, "行数が変わった"):
+            selected._clear_page_selection(page, [True])
 
     def test_selected_csv_id_mismatch_is_rejected_before_pdf_download(self):
         expected = [row("one"), row("two")]
