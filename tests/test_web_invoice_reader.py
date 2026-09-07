@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from invoice_manager import db
 from invoice_manager.services import historical_costs as history
+from invoice_manager.services.operation_cancellation import CancellationToken, OperationCancelled, cancellation_scope
 from invoice_manager.services import web_invoice_reader as reader
 from invoice_manager.services.web_allocation_plan import AllocationLine
 
@@ -215,6 +216,36 @@ class WebInvoiceParserTests(unittest.TestCase):
             with self.subTest(cell_count=len(cells)), self.assertRaisesRegex(reader.InvoiceReadError, "セル数"):
                 reader.parse_assessment_rows(reader.ASSESSMENT_HEADERS, [cells])
 
+    def test_malformed_second_row_reports_id_row_and_only_first_cell(self) -> None:
+        leaked = "秘密の他セル値"
+        rows = [assessment_row(), ["不正な工種表示", "2", "10%", "0", "2", leaked, leaked, leaked]]
+
+        with self.assertRaisesRegex(reader.InvoiceReadError, "Webの工種コードと工種名を読み取れません") as raised:
+            reader.parse_assessment_rows(reader.ASSESSMENT_HEADERS, rows, external_id="invoice-二件目")
+
+        message = str(raised.exception)
+        self.assertIn("請求ID: invoice-二件目", message)
+        self.assertIn("行: 2", message)
+        self.assertIn("先頭セル: '不正な工種表示'", message)
+        self.assertNotIn(leaked, message)
+
+    def test_malformed_first_cell_escapes_controls_and_truncates_display(self) -> None:
+        first_cell = "不正\nセル\t" + ("X" * 220)
+
+        with self.assertRaisesRegex(reader.InvoiceReadError, "Webの工種コードと工種名を読み取れません") as raised:
+            reader.parse_assessment_rows(
+                reader.ASSESSMENT_HEADERS,
+                [[first_cell, "2", "10%", "0", "2", "", "", ""]],
+                external_id="invoice-1",
+            )
+
+        message = str(raised.exception)
+        self.assertIn(r"'不正\nセル\t", message)
+        self.assertEqual(message.count("X"), 200 - len("不正\nセル\t"))
+        self.assertIn("…（省略）", message)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\t", message)
+
     def test_arbitrary_nonempty_work_type_code_is_preserved(self) -> None:
         line = reader.parse_assessment_rows(
             reader.ASSESSMENT_HEADERS,
@@ -290,6 +321,97 @@ class WebInvoiceParserTests(unittest.TestCase):
                 ("wait_for_load_state", "networkidle", 30_000),
             ],
         )
+
+    def test_page_reader_passes_invoice_id_to_assessment_parser(self) -> None:
+        external_id = str(uuid4())
+        with patch.object(reader, "parse_assessment_rows", wraps=reader.parse_assessment_rows) as parser:
+            reader.read_invoice_page(_ReadOnlyPage(), external_id)
+
+        parser.assert_called_once()
+        self.assertEqual(parser.call_args.kwargs["external_id"], external_id)
+
+    def test_page_reader_does_not_wait_when_rows_are_ready(self) -> None:
+        page = _ReadOnlyPage()
+        page.wait_for_timeout = lambda _milliseconds: self.fail("ready rows must not wait")
+
+        result = reader.read_invoice_page(page, str(uuid4()))
+
+        self.assertEqual(len(result.lines), 1)
+
+    def test_page_reader_retries_placeholder_rows_without_reload(self) -> None:
+        placeholder_rows = [
+            ["該当項目なし", "0", "10%", "0", "0", "", "", ""],
+            ["該当項目なし", "0", "10%", "0", "0", "", "", ""],
+        ]
+        valid_rows = [
+            assessment_row(code="D603", name="土工", net=500, tax=50, gross=550),
+            assessment_row(code="D607", name="舗装工", net=500, tax=50, gross=550),
+        ]
+        page = _ReadOnlyPage(rows=placeholder_rows)
+        waits = []
+        first_ready_rows = [valid_rows[0], placeholder_rows[1]]
+
+        def wait_for_timeout(milliseconds):
+            waits.append(milliseconds)
+            page.panel.region._rows = first_ready_rows if len(waits) == 1 else valid_rows
+
+        page.wait_for_timeout = wait_for_timeout
+        external_id = str(uuid4())
+        result = reader.read_invoice_page(page, external_id)
+
+        self.assertEqual([(line.code, line.amount_included) for line in result.lines], [("D603", 550), ("D607", 550)])
+        self.assertEqual(len([call for call in page.calls if call[0] == "goto"]), 1)
+        self.assertEqual(waits, [250, 250])
+
+    def test_permanent_placeholder_rows_hit_deadline_with_diagnostic(self) -> None:
+        page = _ReadOnlyPage(rows=[["該当項目なし", "0", "10%", "0", "0", "", "", ""]])
+        waits = []
+        page.wait_for_timeout = lambda milliseconds: waits.append(milliseconds)
+        external_id = str(uuid4())
+
+        with patch.object(reader.time, "monotonic", side_effect=[0, 0, 31]):
+            with self.assertRaisesRegex(reader.InvoiceReadError, "請求ID: .*行: 1.*該当項目なし"):
+                reader.read_invoice_page(page, external_id)
+        self.assertEqual(waits, [250])
+
+    def test_cancellation_during_placeholder_wait_stops_without_parsing(self) -> None:
+        page = _ReadOnlyPage(rows=[["該当項目なし", "0", "10%", "0", "0", "", "", ""]])
+        token = CancellationToken()
+        page.wait_for_timeout = lambda _milliseconds: token.request()
+
+        with patch.object(reader, "parse_assessment_rows", side_effect=AssertionError("cancelled read must not parse")):
+            with cancellation_scope(token), self.assertRaises(OperationCancelled):
+                reader.read_invoice_page(page, str(uuid4()))
+
+    def test_non_placeholder_malformed_rows_fail_closed_without_wait(self) -> None:
+        page = _ReadOnlyPage(rows=[["不正な工種表示", "2", "10%", "0", "2", "", "", ""]])
+        page.wait_for_timeout = lambda _milliseconds: self.fail("non-placeholder rows must not wait")
+
+        with self.assertRaisesRegex(reader.InvoiceReadError, "工種コードと工種名"):
+            reader.read_invoice_page(page, str(uuid4()))
+
+    def test_changed_headers_or_cell_shape_fail_closed_without_wait(self) -> None:
+        cases = [
+            (list(reader.ASSESSMENT_HEADERS[:-1]) + ["変更列"], [["該当項目なし", "0", "10%", "0", "0", "", "", ""]]),
+            (list(reader.ASSESSMENT_HEADERS), [["該当項目なし", "0", "10%", "0", "0", ""]]),
+        ]
+        for headers, rows in cases:
+            with self.subTest(headers=headers, rows=rows):
+                page = _ReadOnlyPage(headers=headers, rows=rows)
+                page.wait_for_timeout = lambda _milliseconds: self.fail("changed table shape must not wait")
+                with self.assertRaisesRegex(reader.InvoiceReadError, "(列構成|セル数)"):
+                    reader.read_invoice_page(page, str(uuid4()))
+
+    def test_redirect_during_placeholder_wait_is_rejected(self) -> None:
+        page = _ReadOnlyPage(rows=[["該当項目なし", "0", "10%", "0", "0", "", "", ""]])
+
+        def redirect_and_finish(_milliseconds):
+            page.url = f"{reader.ORIGIN}/invoices/{uuid4()}"
+            page.panel.region._rows = [assessment_row()]
+
+        page.wait_for_timeout = redirect_and_finish
+        with self.assertRaisesRegex(reader.InvoiceReadError, "別の請求ページ"):
+            reader.read_invoice_page(page, str(uuid4()))
 
     def test_page_reader_requires_empty_third_operation_cell_in_item_table(self) -> None:
         external_id = str(uuid4())

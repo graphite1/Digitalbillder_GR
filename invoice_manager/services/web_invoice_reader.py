@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,17 +45,22 @@ def parse_web_amount(value: str) -> int:
     return int(text)
 
 
-def parse_assessment_rows(headers, rows) -> tuple[AllocationLine, ...]:
+def parse_assessment_rows(headers, rows, *, external_id: str | None = None) -> tuple[AllocationLine, ...]:
     if tuple(headers) not in (ASSESSMENT_HEADERS, ASSESSMENT_ORDER_HEADERS):
         raise InvoiceReadError("査定入力の列構成が変わっています。取得を停止しました。")
     lines = []
-    for cells in rows:
+    for row_number, cells in enumerate(rows, start=1):
         check_cancelled()
         if len(cells) != len(headers):
             raise InvoiceReadError("査定入力のセル数が一致しません。")
         match = re.fullmatch(r"([^\s()]+)\s*\((.+)\)", cells[0].strip(), flags=re.DOTALL)
         if not match:
-            raise InvoiceReadError("Webの工種コードと工種名を読み取れません。")
+            # Keep only the failing display cell; repr escapes control characters.
+            display = repr(cells[0][:200]) + ("…（省略）" if len(cells[0]) > 200 else "")
+            raise InvoiceReadError(
+                "Webの工種コードと工種名を読み取れません。"
+                f"（請求ID: {external_id or '不明'}、行: {row_number}、先頭セル: {display}）"
+            )
         tax_label = cells[2].strip()
         if tax_label in ("10% (0.1)", "10%"):
             rate = "10"
@@ -82,14 +88,30 @@ def read_invoice_page(page, external_id: str) -> WebInvoiceRead:
     region.wait_for(state="visible")
     check_cancelled()
     wait_for_network_idle(page)
+    deadline = None
+    while True:
+        check_cancelled()
+        headers = [s.strip() for s in region.get_by_role("columnheader").all_text_contents()]
+        check_cancelled()
+        rows = region.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
+        check_cancelled()
+        # The work-type lookup can render after networkidle. Wait only for the
+        # observed placeholder, never infer a code or reload the invoice page.
+        if (tuple(headers) not in (ASSESSMENT_HEADERS, ASSESSMENT_ORDER_HEADERS)
+                or any(len(cells) != len(headers) for cells in rows)
+                or not any(cells[0].strip() == "該当項目なし" for cells in rows)):
+            break
+        if deadline is None:
+            deadline = time.monotonic() + 30
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(min(250, remaining * 1000))
+    check_cancelled()
     parsed = urlparse(page.url)
     if f"{parsed.scheme}://{parsed.netloc}" != ORIGIN or parsed.path != f"/invoices/{external_id}":
         raise InvoiceReadError("別の請求ページへ移動したため取得を停止しました。")
-    headers = region.get_by_role("columnheader").all_text_contents()
-    check_cancelled()
-    rows = region.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
-    check_cancelled()
-    lines = parse_assessment_rows([s.strip() for s in headers], rows)
+    lines = parse_assessment_rows(headers, rows, external_id=external_id)
     project_table = panel.get_by_role("table").filter(has=page.get_by_role("columnheader", name="工事コード", exact=True))
     project_rows = project_table.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
     check_cancelled()
