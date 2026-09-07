@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from invoice_manager import db
+from invoice_manager import db, repositories
 from invoice_manager.services.project_budget import (
     BudgetRowInput,
     ExtractedBudgetCandidate,
@@ -17,7 +17,9 @@ from invoice_manager.services.project_budget import (
     preview_source_document,
     resolve_budget_source,
     save_project_budget,
+    suggest_budget_work_type_mappings,
 )
+from invoice_manager.services.work_type_resolution import CanonicalWorkType
 
 
 class ProjectBudgetTests(unittest.TestCase):
@@ -148,6 +150,85 @@ class ProjectBudgetTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
                     prepare_budget_rows_from_candidates(candidates)
+
+    def test_pdf_numeric_code_uses_registered_d_mapping_without_changing_source(self) -> None:
+        repositories.save_work_type_code(self.project_id, "513", "マスタ科目")
+        candidate = self.candidate("513", name="")
+        rows, skipped = prepare_budget_rows_from_candidates([candidate], project_id=self.project_id)
+        self.assertEqual(skipped, ())
+        self.assertEqual(rows[0].work_type_code, "513")
+        self.assertEqual(rows[0].work_type_name, "マスタ科目")
+        self.assertEqual(rows[0].actual_work_type_code, "D513")
+        self.assertIs(rows[0].source_candidate, candidate)
+        self.assertEqual(candidate.work_type_name, "")
+        self.assertFalse(rows[0].include_in_total)
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_actual_prefix_wins_over_local_d_rule_in_budget_proposal(self) -> None:
+        repositories.save_work_type_code(self.project_id, "513", "基本科目")
+        with patch("invoice_manager.services.work_type_resolution.load_confirmed_work_types",
+                   return_value=(CanonicalWorkType("B513", "正式科目"),)):
+            rows, _ = prepare_budget_rows_from_candidates(
+                [self.candidate("５１３", name="")], project_id=self.project_id
+            )
+        self.assertEqual(rows[0].work_type_code, "５１３")
+        self.assertEqual(rows[0].actual_work_type_code, "B513")
+        self.assertEqual(rows[0].work_type_name, "正式科目")
+
+    def test_unknown_ambiguous_and_competing_budget_codes_remain_unmapped(self) -> None:
+        catalog = (CanonicalWorkType("D513", "明細"), CanonicalWorkType("D301", "土木"),
+                   CanonicalWorkType("B301", "建築"))
+        with patch("invoice_manager.services.project_budget.load_work_type_choices", return_value=catalog):
+            rows, issues = suggest_budget_work_type_mappings(
+                self.project_id, [self.row(code) for code in ("999", "301", "513", "D513")]
+            )
+        self.assertTrue(all(row.actual_work_type_code is None for row in rows))
+        self.assertEqual(len(issues), 4)
+        self.assertTrue(any("複数" in issue for issue in issues))
+        self.assertTrue(any("重複" in issue for issue in issues))
+
+    def test_budget_mapping_preserves_explicit_choice_and_reserves_it(self) -> None:
+        repositories.save_work_type_code(self.project_id, "513", "明細")
+        manual = self.row("MANUAL", actual_work_type_code="D513", budget_net=9876)
+        proposed, issues = suggest_budget_work_type_mappings(
+            self.project_id, [manual, self.row("513")]
+        )
+        self.assertEqual(proposed[0], manual)
+        self.assertIsNone(proposed[1].actual_work_type_code)
+        self.assertEqual(len(issues), 1)
+        rows, _ = prepare_budget_rows_from_candidates(
+            [self.candidate("513")], project_id=self.project_id, existing_actual_codes=("D513",)
+        )
+        self.assertIsNone(rows[0].actual_work_type_code)
+
+    def test_confirmed_mapping_updates_forecast_but_preserves_saved_source_and_row_id(self) -> None:
+        repositories.save_work_type_code(self.project_id, "513", "明細")
+        source = self.make_table_pdf()
+        original_bytes = source.read_bytes()
+        first = save_project_budget(
+            self.project_id, [self.row("513", source_candidate=self.candidate("513"), remaining_net=50)],
+            source_path=source, confirmed=True,
+        )
+        old = first.rows[0]
+        rows, issues = suggest_budget_work_type_mappings(self.project_id, [
+            self.row(old.work_type_code, row_id=old.id, remaining_net=old.remaining_net)
+        ])
+        self.assertFalse(issues)
+        self.assertIsNone(get_project_budget(self.project_id).rows[0].actual_work_type_code)
+        saved = save_project_budget(self.project_id, rows, confirmed=True)
+        self.assertEqual(saved.rows[0].id, old.id)
+        self.assertEqual(saved.rows[0].source_candidate_json, old.source_candidate_json)
+        self.assertEqual(saved.rows[0].work_type_code, "513")
+        self.assertEqual(source.read_bytes(), original_bytes)
+        with (
+            patch("invoice_manager.services.historical_costs.list_actual_costs", return_value=[
+                SimpleNamespace(work_type_code="D513", work_type_name="明細", net_amount=100)]),
+            patch("invoice_manager.services.historical_costs.get_historical_sync_status",
+                  return_value=SimpleNamespace(last_successful_refresh="2026-09-07")),
+        ):
+            forecast = build_project_forecast(self.project_id)
+        self.assertEqual(len(forecast), 1)
+        self.assertEqual(forecast[0].projected_final_net, 150)
 
     def test_save_requires_explicit_confirmation_and_rejects_duplicate_codes(self) -> None:
         with self.assertRaisesRegex(ValueError, "確認"):

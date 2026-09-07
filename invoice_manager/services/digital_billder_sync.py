@@ -12,7 +12,8 @@ from threading import Lock
 from invoice_manager import db
 from invoice_manager.models import InvoiceCsvRow
 from invoice_manager.services.csv_reader import REQUIRED_COLUMNS, read_invoice_csv
-from invoice_manager.services.digital_billder_download import download_csv, download_zip, export_session
+from invoice_manager.services.digital_billder_download import download_csv, export_session
+from invoice_manager.services.selected_invoice_download import download_selected_zip
 from invoice_manager.services.import_service import execute_import, preview_import
 from invoice_manager.services.operation_cancellation import check_cancelled, begin_commit
 
@@ -138,8 +139,8 @@ def import_selected(ids: set[str], progress=lambda text: None):
                     check_cancelled()
                     if current_by_id[invoice_id].raw_data != pending_by_id[invoice_id].raw_data:
                         raise ValueError("確認後に請求内容が変わりました。新着確認をやり直してください。")
-                progress("請求書のZIPを取得しています…")
-                zip_path = download_zip(page, folder / "invoices.zip")
+                progress("選択した未取込請求のPDFを取得しています…")
+                zip_path = download_selected_zip(page, folder / "invoices.zip", current, ids, progress)
                 check_cancelled()
             selected_csv = folder / "selected.csv"
             write_selected_csv(selected_csv, [current_by_id[i] for i in sorted(ids)])
@@ -148,6 +149,8 @@ def import_selected(ids: set[str], progress=lambda text: None):
             missing_pdf = ids - set(preview.zip_index.pdf_by_id)
             if preview.errors or missing_pdf:
                 raise ValueError("選択した請求のCSV・PDFが揃っていません。未確認のまま残します。")
+            if set(preview.zip_index.pdf_by_id) != ids:
+                raise ValueError("選択していない請求のPDFが含まれています。取込は行いません。")
             if preview.new_count != len(ids):
                 raise ValueError("選択した請求に重複候補・アーカイブ工事があります。手動取込で内容を確認してください。")
             progress("選択した請求を台帳に登録しています…")

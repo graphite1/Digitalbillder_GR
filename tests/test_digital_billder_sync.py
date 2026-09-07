@@ -43,9 +43,11 @@ class DigitalBillderSyncTests(unittest.TestCase):
         sync.write_selected_csv(path, self.rows)
         return path
 
-    def fake_zip(self, page, path):
+    def fake_zip(self, page, path, rows, selected_ids, progress):
         with ZipFile(path, "w") as archive:
-            for row in self.rows:
+            for row in rows:
+                if row.external_id not in selected_ids:
+                    continue
                 archive.writestr(f"invoices/{row.external_id}/invoice.pdf", b"%PDF-1.4\n%%EOF\n")
         return path
 
@@ -53,7 +55,7 @@ class DigitalBillderSyncTests(unittest.TestCase):
         with (
             patch.object(sync, "export_session", return_value=nullcontext(object())),
             patch.object(sync, "download_csv", side_effect=self.fake_csv),
-            patch.object(sync, "download_zip", side_effect=self.fake_zip),
+              patch.object(sync, "download_selected_zip", side_effect=self.fake_zip),
         ):
             return sync.import_selected(ids)
 
@@ -85,6 +87,41 @@ class DigitalBillderSyncTests(unittest.TestCase):
         sync.remember_candidates(self.rows)
         self.assertEqual(self.candidate_ids(), {"two"})
 
+    def test_downloader_receives_only_selected_ids(self):
+        sync.remember_candidates(self.rows)
+        with patch.object(sync, "export_session", return_value=nullcontext(object())), \
+             patch.object(sync, "download_csv", side_effect=self.fake_csv), \
+             patch.object(sync, "download_selected_zip", side_effect=self.fake_zip) as downloader:
+            sync.import_selected({"one"})
+        self.assertEqual(downloader.call_args.args[3], {"one"})
+
+    def test_imported_invoice_cannot_be_selected_again(self):
+        batch = repositories.create_import_batch("2026-08", Path("x.csv"), Path("x.zip"), "", "", "")
+        repositories.insert_invoice(self.rows[0], "2026-08", batch)
+        sync.remember_candidates(self.rows)
+        with self.assertRaisesRegex(ValueError, "破棄済み・対象外・処理済み"):
+            self.run_import({"one"})
+
+    def test_unselected_pdf_is_rejected_without_registering_any_invoice(self):
+        sync.remember_candidates(self.rows)
+
+        def zip_with_stray(_page, path, rows, selected_ids, _progress):
+            with ZipFile(path, "w") as archive:
+                for identifier in selected_ids | {"two"}:
+                    archive.writestr(f"invoices/{identifier}/invoice.pdf", b"%PDF-1.4\n%%EOF\n")
+            return path
+
+        with (
+            patch.object(sync, "export_session", return_value=nullcontext(object())),
+            patch.object(sync, "download_csv", side_effect=self.fake_csv),
+            patch.object(sync, "download_selected_zip", side_effect=zip_with_stray),
+        ):
+            with self.assertRaisesRegex(ValueError, "選択していない請求"):
+                sync.import_selected({"one"})
+        with db.get_connection() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM invoices").fetchone()[0], 0)
+        self.assertEqual(self.candidate_ids(), {"one", "two"})
+
     def test_previous_manual_import_is_known(self):
         batch = repositories.create_import_batch("2026-08", Path("x.csv"), Path("x.zip"), "", "", "")
         repositories.insert_invoice(self.rows[0], "2026-08", batch)
@@ -106,7 +143,7 @@ class DigitalBillderSyncTests(unittest.TestCase):
         sync.remember_candidates(self.rows)
         original = self.fake_zip
 
-        def empty_zip(page, path):
+        def empty_zip(page, path, rows, selected_ids, progress):
             with ZipFile(path, "w"):
                 pass
             return path

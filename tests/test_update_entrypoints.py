@@ -269,7 +269,7 @@ class UpdateWindowPolicyTests(unittest.TestCase):
         self.assertIn("メモ", message)
 
     def test_release_identity_matches_current_release(self) -> None:
-        self.assertEqual((APP_VERSION, RELEASE_SEQUENCE), ("1.0.7", 7))
+        self.assertEqual((APP_VERSION, RELEASE_SEQUENCE), ("1.0.8", 8))
 
 
 if __name__ == "__main__":

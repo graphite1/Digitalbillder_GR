@@ -6,7 +6,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from invoice_manager.repositories import list_projects, list_work_type_codes
+from invoice_manager.repositories import list_projects
+from invoice_manager.services.work_type_resolution import (
+    CanonicalWorkType,
+    WorkTypeResolutionError,
+    load_work_type_choices,
+    resolve_from_catalog,
+)
 from invoice_manager.services.project_budget import (
     BudgetRowInput,
     ExtractedBudgetCandidate,
@@ -17,6 +23,7 @@ from invoice_manager.services.project_budget import (
     preview_source_document,
     resolve_budget_source,
     save_project_budget,
+    suggest_budget_work_type_mappings,
 )
 
 
@@ -157,6 +164,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         ttk.Button(row_actions, text="全行を選択", command=self._select_all_rows).pack(side=tk.LEFT, padx=2)
         ttk.Button(row_actions, text="選択行を集計に含める", command=lambda: self._set_selected_inclusion(True)).pack(side=tk.LEFT, padx=2)
         ttk.Button(row_actions, text="選択行を集計から外す", command=lambda: self._set_selected_inclusion(False)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_actions, text="Web工種を照合", command=self._match_actual_codes).pack(side=tk.LEFT, padx=2)
         ttk.Button(row_actions, text="選択行を編集", command=self._edit_current_row).pack(side=tk.LEFT, padx=2)
         ttk.Button(row_actions, text="選択行を外す", command=self._remove_row).pack(side=tk.LEFT, padx=2)
         ttk.Button(row_actions, text="入力クリア", command=self._clear_form).pack(side=tk.LEFT, padx=2)
@@ -239,23 +247,11 @@ class ProjectBudgetWindow(tk.Toplevel):
         if project_id is None:
             return
         mapping_labels = []
-        for row in list_work_type_codes(project_id):
-            code, name = str(row["code"]), str(row["name"])
+        for row in load_work_type_choices(project_id):
+            code, name = row.code, row.name
             label = f"{code}｜{name}"
             self.code_name_options[label] = (code, name)
             mapping_labels.append(label)
-        try:
-            from invoice_manager.services.historical_costs import list_actual_costs
-
-            for row in list_actual_costs(project_id):
-                code, name = str(row.work_type_code), str(row.work_type_name)
-                label = f"{code}｜{name}"
-                if label not in self.code_name_options:
-                    self.code_name_options[label] = (code, name)
-                    mapping_labels.append(label)
-        except Exception:
-            # Budget editing remains available before historical data is initialized.
-            pass
         self.actual_combo.configure(values=mapping_labels)
         budget = get_project_budget(project_id)
         self.note_entry.delete(0, tk.END)
@@ -343,6 +339,9 @@ class ProjectBudgetWindow(tk.Toplevel):
                 [self.candidate_values[item] for item in items],
                 existing_codes=[str(row["work_type_code"]) for row in self.row_values.values()],
                 fallback_names={code: name for code, name in self.code_name_options.values()},
+                project_id=self._project_id(),
+                existing_actual_codes=[str(row["actual_work_type_code"]) for row in self.row_values.values()
+                                       if row["actual_work_type_code"]],
             )
         except ValueError as exc:
             messagebox.showwarning("一括追加の確認", f"{exc}\n\n候補を個別に修正するか、確認できた候補だけ選択して追加してください。", parent=self)
@@ -364,10 +363,39 @@ class ProjectBudgetWindow(tk.Toplevel):
             self.row_tree.selection_set(added_items)
             self.row_tree.see(added_items[0])
         skipped_text = f" 既存の{len(skipped)}行は変更していません。" if skipped else ""
+        mapped_count = sum(row.actual_work_type_code is not None for row in rows)
         self.batch_status_var.set(
-            f"{len(rows)}行を追加しました（未保存）。{skipped_text} 集計対象の明細を選び、「予算を保存」で一括登録します。"
+            f"{len(rows)}行を追加しました（未保存）。Web対応候補 {mapped_count}件、未対応 {len(rows) - mapped_count}件。"
+            f"{skipped_text} Web工種対応と集計対象を確認し、「予算を保存」で一括登録します。"
         )
         self._update_rows_summary()
+
+    def _match_actual_codes(self) -> None:
+        project_id = self._project_id()
+        if project_id is None or not self.row_values:
+            return
+        try:
+            rows, issues = suggest_budget_work_type_mappings(project_id, self.row_values.values())
+        except ValueError as exc:
+            messagebox.showwarning("Web工種の照合", str(exc), parent=self)
+            return
+        changed = 0
+        for (item, current), proposed in zip(self.row_values.items(), rows):
+            if current["actual_work_type_code"] != proposed.actual_work_type_code:
+                current["actual_work_type_code"] = proposed.actual_work_type_code
+                self._render_row(item)
+                if item == self.editing_item and not self.actual_code_var.get().strip():
+                    self.actual_code_var.set(proposed.actual_work_type_code or "")
+                changed += 1
+        self.batch_status_var.set(
+            f"Web対応候補 {changed}件を補完しました（未保存）。設定済み対応は保持しています。"
+            f" 未対応 {len(issues)}件。対応内容を確認して「予算を保存」を押してください。"
+        )
+        if issues:
+            detail = "\n".join(issues[:8])
+            if len(issues) > 8:
+                detail += f"\nほか {len(issues) - 8}件"
+            messagebox.showwarning("Web工種の照合・要確認", detail, parent=self)
 
     def _select_all_rows(self) -> None:
         self.row_tree.selection_set(self.row_tree.get_children())
@@ -393,10 +421,12 @@ class ProjectBudgetWindow(tk.Toplevel):
         )
 
     def _master_name(self, code: str) -> str:
-        for mapped_code, name in self.code_name_options.values():
-            if mapped_code == code:
-                return name
-        return ""
+        try:
+            return resolve_from_catalog(
+                code, (CanonicalWorkType(mapped_code, name) for mapped_code, name in self.code_name_options.values())
+            ).name
+        except WorkTypeResolutionError:
+            return ""
 
     def _candidate_to_form(self) -> None:
         selection = self.candidate_tree.selection()
@@ -411,7 +441,16 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.scheduled_var.set("" if candidate.scheduled_net is None else str(candidate.scheduled_net))
         self.remaining_var.set("")
         self.include_var.set(False)
-        self.actual_code_var.set("")
+        try:
+            mapping = resolve_from_catalog(
+                candidate.work_type_code,
+                (CanonicalWorkType(code, name) for code, name in self.code_name_options.values()),
+            ).code
+        except WorkTypeResolutionError:
+            mapping = ""
+        if any(row["actual_work_type_code"] == mapping for row in self.row_values.values()):
+            mapping = ""
+        self.actual_code_var.set(mapping)
         self._set_original_label(candidate)
 
     def _set_original_label(self, candidate: ExtractedBudgetCandidate | None) -> None:

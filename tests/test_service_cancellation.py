@@ -86,7 +86,7 @@ class ServiceCancellationTests(unittest.TestCase):
             return self.root / "mock.zip"
 
         with (cancellation_scope(self.token), self.import_patches(),
-              patch.object(sync, "download_zip", side_effect=fetch), patch.object(sync, "preview_import") as preview,
+              patch.object(sync, "download_selected_zip", side_effect=fetch), patch.object(sync, "preview_import") as preview,
               patch.object(sync, "execute_import") as execute):
             with self.assertRaises(OperationCancelled):
                 sync.import_selected({"synthetic"})
@@ -102,7 +102,7 @@ class ServiceCancellationTests(unittest.TestCase):
                 self.token.request()
 
         with (cancellation_scope(self.token), self.import_patches(),
-              patch.object(sync, "download_zip", return_value=self.root / "mock.zip"),
+              patch.object(sync, "download_selected_zip", return_value=self.root / "mock.zip"),
               patch.object(sync, "preview_import", return_value=preview), patch.object(sync, "execute_import") as execute):
             with self.assertRaises(OperationCancelled):
                 sync.import_selected({"synthetic"}, progress)
@@ -120,7 +120,7 @@ class ServiceCancellationTests(unittest.TestCase):
 
         connection = MagicMock()
         with (cancellation_scope(self.token), self.import_patches(),
-              patch.object(sync, "download_zip", return_value=self.root / "mock.zip"),
+              patch.object(sync, "download_selected_zip", return_value=self.root / "mock.zip"),
               patch.object(sync, "preview_import", return_value=preview), patch.object(sync, "execute_import", side_effect=execute),
               patch.object(db, "atomic_transaction", return_value=nullcontext()),
               patch.object(db, "get_connection", return_value=nullcontext(connection))):

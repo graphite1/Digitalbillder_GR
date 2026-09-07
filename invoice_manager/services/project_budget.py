@@ -11,12 +11,18 @@ import json
 import os
 import re
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
 from invoice_manager import db
+from invoice_manager.services.work_type_resolution import (
+    CanonicalWorkType,
+    WorkTypeResolutionError,
+    load_work_type_choices,
+    resolve_from_catalog,
+)
 
 
 SUPPORTED_SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xlsm"})
@@ -259,6 +265,8 @@ def prepare_budget_rows_from_candidates(
     *,
     existing_codes: Iterable[str] = (),
     fallback_names: Mapping[str, str] | None = None,
+    project_id: int | None = None,
+    existing_actual_codes: Iterable[str] = (),
 ) -> tuple[tuple[BudgetRowInput, ...], tuple[str, ...]]:
     """Validate a complete preview and prepare review-only budget editor rows.
 
@@ -272,6 +280,7 @@ def prepare_budget_rows_from_candidates(
         _required_text(code, "既存工種コード") for code in existing_codes
     }
     name_fallbacks = fallback_names or {}
+    catalog = load_work_type_choices(project_id) if project_id is not None else ()
     prepared: list[BudgetRowInput] = []
     seen_locations: dict[str, str] = {}
 
@@ -292,6 +301,11 @@ def prepare_budget_rows_from_candidates(
 
         candidate_name = str(candidate.work_type_name or "").strip()
         fallback_name = str(name_fallbacks.get(code, "") or "").strip()
+        if not candidate_name and not fallback_name and catalog:
+            try:
+                fallback_name = resolve_from_catalog(code, catalog).name.strip()
+            except WorkTypeResolutionError:
+                pass
         name = candidate_name or fallback_name
         if not name:
             raise ValueError(f"抽出候補 {location}（{code}）: 工種名は必須です。")
@@ -313,7 +327,48 @@ def prepare_budget_rows_from_candidates(
 
     rows = tuple(row for row in prepared if row.work_type_code not in protected_codes)
     skipped = tuple(row.work_type_code for row in prepared if row.work_type_code in protected_codes)
+    if project_id is not None:
+        rows, _ = _suggest_budget_mappings(rows, catalog, existing_actual_codes)
     return rows, skipped
+
+
+def _suggest_budget_mappings(
+    rows: tuple[BudgetRowInput, ...],
+    catalog: tuple[CanonicalWorkType, ...],
+    reserved_actual_codes: Iterable[str] = (),
+) -> tuple[tuple[BudgetRowInput, ...], tuple[str, ...]]:
+    """Offer unique mappings without changing printed codes or explicit mappings."""
+    reserved = set(reserved_actual_codes) | {
+        row.actual_work_type_code for row in rows if row.actual_work_type_code
+    }
+    proposals: dict[int, str] = {}
+    issues: list[str] = []
+    for index, row in enumerate(rows):
+        if row.actual_work_type_code:
+            continue
+        try:
+            proposals[index] = resolve_from_catalog(row.work_type_code, catalog).code
+        except WorkTypeResolutionError as exc:
+            issues.append(f"{row.work_type_code}: {exc}")
+    counts: dict[str, int] = {}
+    for code in proposals.values():
+        counts[code] = counts.get(code, 0) + 1
+    result = list(rows)
+    for index, code in proposals.items():
+        if code in reserved or counts[code] > 1:
+            issues.append(f"{rows[index].work_type_code}: Web工種 {code} は他の予算行と重複するため未対応です。")
+        else:
+            result[index] = replace(rows[index], actual_work_type_code=code)
+    return tuple(result), tuple(issues)
+
+
+def suggest_budget_work_type_mappings(
+    project_id: int,
+    rows: Iterable[BudgetRowInput | Mapping[str, object]],
+) -> tuple[tuple[BudgetRowInput, ...], tuple[str, ...]]:
+    """Prepare unsaved mappings for review; never replace explicit saved choices."""
+    normalized = tuple(_normalize_row(row) for row in rows)
+    return _suggest_budget_mappings(normalized, load_work_type_choices(project_id))
 
 
 def _normalize_rows(rows: Iterable[BudgetRowInput | Mapping[str, object]]) -> tuple[BudgetRowInput, ...]:

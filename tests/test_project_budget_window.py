@@ -159,6 +159,43 @@ class ProjectBudgetWindowTests(unittest.TestCase):
         self.assertEqual(self.window.row_values, {})
         self.assertIsNone(get_project_budget(self.project_id))
 
+    def test_numeric_pdf_candidate_proposes_web_code_in_bulk_and_individual_editor(self) -> None:
+        repositories.save_work_type_code(self.project_id, "513", "確認科目")
+        self.window._project_changed()
+        self.assertIn("D513｜確認科目", self.window.actual_combo.cget("values"))
+        candidate = self.candidate("513", name="")
+        self.show_candidates(candidate)
+        self.window.candidate_tree.selection_set(self.window.candidate_tree.get_children())
+        self.window._candidate_to_form()
+        self.assertEqual(self.window.code_var.get(), "513")
+        self.assertEqual(self.window.name_var.get(), "確認科目")
+        self.assertEqual(self.window.actual_code_var.get(), "D513")
+        self.window._add_all_candidates()
+        row = next(iter(self.window.row_values.values()))
+        self.assertEqual(row["work_type_code"], "513")
+        self.assertEqual(row["actual_work_type_code"], "D513")
+        self.assertIs(row["source_candidate"], candidate)
+        self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_mapping_existing_editor_rows_is_unsaved_and_keeps_manual_mapping(self) -> None:
+        self.show_candidates(self.candidate("513"), self.candidate("514", location="表1 行3"))
+        self.window._add_all_candidates()
+        rows = list(self.window.row_values.values())
+        rows[1]["actual_work_type_code"] = "CUSTOM"
+        rows[1]["budget_net"] = 5555
+        self.window.row_tree.selection_set(self.window.row_tree.get_children()[0])
+        self.window._edit_current_row()
+        self.window.budget_var.set("7777")
+        repositories.save_work_type_code(self.project_id, "513", "確認科目")
+        self.window._match_actual_codes()
+        self.assertEqual(rows[0]["actual_work_type_code"], "D513")
+        self.assertEqual(rows[1]["actual_work_type_code"], "CUSTOM")
+        self.assertEqual(rows[1]["budget_net"], 5555)
+        self.assertEqual(self.window.actual_code_var.get(), "D513")
+        self.assertEqual(self.window.budget_var.get(), "7777")
+        self.assertIn("未保存", self.window.batch_status_var.get())
+        self.assertIsNone(get_project_budget(self.project_id))
+
     def test_cancelled_save_confirmation_does_not_write_database(self) -> None:
         self.show_candidates(self.candidate("CANCEL", budget=700, scheduled=600))
         self.window._add_all_candidates()
