@@ -250,7 +250,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         ttk.Label(bottom, text="メモ").pack(side=tk.LEFT)
         self.note_entry = ttk.Entry(bottom)
         self.note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
-        self.save_button = ttk.Button(bottom, text="予算を保存", command=self._save)
+        self.save_button = ttk.Button(bottom, text="予算を確認して登録", command=self._save)
         self.save_button.pack(side=tk.RIGHT, padx=3)
         ttk.Button(bottom, text="消化状況を再表示", command=self._refresh_forecast).pack(side=tk.RIGHT, padx=3)
 
@@ -419,10 +419,19 @@ class ProjectBudgetWindow(tk.Toplevel):
 
     def _apply_source_preview(self, preview: SourcePreview) -> None:
         self._show_candidates(preview)
+        # A new source replaces only the provisional editor state.  The saved
+        # budget remains unchanged until the single confirmation action below.
+        self.row_values.clear()
+        self.row_tree.delete(*self.row_tree.get_children())
         self.source_preview = preview
         self.source_path = preview.path
         self.source_var.set(preview.path.name)
-        self.batch_status_var.set(f"{len(preview.candidates)}件を抽出しました。まとめて追加後、集計対象を選んで保存できます。")
+        if preview.candidates:
+            self._add_candidates(self.candidate_tree.get_children(), auto_include=True)
+            self.source_frame.grid_remove()
+        self.batch_status_var.set(
+            f"{len(preview.candidates)}件を仮入力しました。全体を確認し、「予算を確認して登録」を押してください。"
+        )
         if preview.warnings:
             self.batch_status_var.set(self.batch_status_var.get() + "\n" + "\n".join(preview.warnings))
 
@@ -474,7 +483,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         selected = set(self.candidate_tree.selection())
         self._add_candidates(tuple(item for item in self.candidate_tree.get_children() if item in selected))
 
-    def _add_candidates(self, items) -> None:
+    def _add_candidates(self, items, *, auto_include: bool = False) -> None:
         if self.source_busy:
             return
         if not items:
@@ -499,7 +508,7 @@ class ProjectBudgetWindow(tk.Toplevel):
                 "row_id": None,
                 "work_type_code": row.work_type_code, "work_type_name": row.work_type_name,
                 "budget_net": row.budget_net, "scheduled_net": row.scheduled_net,
-                "remaining_net": row.remaining_net, "include_in_total": row.include_in_total,
+                "remaining_net": row.remaining_net, "include_in_total": auto_include or row.include_in_total,
                 "actual_work_type_code": row.actual_work_type_code,
                 "source_candidate": row.source_candidate,
             }

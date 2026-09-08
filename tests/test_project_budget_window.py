@@ -218,7 +218,10 @@ class ProjectBudgetWindowTests(unittest.TestCase):
 
     def test_candidate_render_failure_keeps_old_source_and_old_candidates_together(self) -> None:
         old = self.result_preview("OLD")
-        self.window._apply_source_preview(old)
+        self.window._show_candidates(old)
+        self.window.source_preview = old
+        self.window.source_path = old.path
+        self.window.source_var.set(old.path.name)
         previous_items = self.window.candidate_tree.get_children()
         previous_values = dict(self.window.candidate_values)
         new = SourcePreview(self.root_path / "new.pdf", "pdf", 2, "",
