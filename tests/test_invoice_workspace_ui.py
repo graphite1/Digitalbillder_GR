@@ -157,7 +157,7 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         self.assertIn("試験担当", self.window.selected_info_var.get())
         self.assertEqual(self.window.memo_var.get(), "合成データのメモ")
         values = self.window.tree.item(item, "values")
-        self.assertEqual(values[8], "D301　100円　｜　D513　200円")
+        self.assertEqual(values[8], "D301　100円\nD513　200円")
         self.assertEqual(self.window.display_work_type_code("590"), "D590")
         self.assertEqual(self.window.display_work_type_code("d590"), "D590")
         self.assertEqual(self.window.display_work_type_code("X590"), "X590")
@@ -165,7 +165,7 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
             self.window.format_allocation_summary(
                 "590\x1f110\x1f100\x1eD301\x1f22\x1f20\x1eD302\x1f33\x1f30\x1eD303\x1f44\x1f40"
             ),
-            "D590　100円　｜　D301　20円\nD302　30円　｜　D303　40円",
+            "D590　100円　｜　D302　30円\nD301　20円　｜　D303　40円",
         )
         self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード ／ 振分金額(税抜)")
         self.assertEqual(str(self.window.detail_button["state"]), "normal")

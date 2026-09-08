@@ -256,7 +256,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.content_panes.add(tree_frame, weight=4)
         self.content_panes.add(self.sidebar, weight=1)
         style = ttk.Style(self)
-        style.configure("InvoiceList.Treeview", rowheight=48)
+        style.configure("InvoiceList.Treeview", rowheight=38)
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended",
                                   style="InvoiceList.Treeview",
                                   displaycolumns=self.load_display_columns())
@@ -468,7 +468,13 @@ class InvoiceListWindow(tk.Toplevel):
         if len(formatted) > 4:
             formatted[3] += f"（ほか{len(formatted) - 4}件）"
             formatted = formatted[:4]
-        return "\n".join("　｜　".join(formatted[index:index + 2]) for index in range(0, len(formatted), 2))
+        left_column = formatted[:2]
+        right_column = formatted[2:]
+        return "\n".join(
+            "　｜　".join(value for value in (left_column[index] if index < len(left_column) else "",
+                                              right_column[index] if index < len(right_column) else "") if value)
+            for index in range(max(len(left_column), len(right_column)))
+        )
 
     @staticmethod
     def display_work_type_code(code: str) -> str:
