@@ -92,6 +92,7 @@ class MainWindow:
                 "設定",
                 (
                     ("工事表示設定", self.open_project_visibility),
+                    ("Digital Billderを開く", self.open_digital_billder),
                     ("アプリの更新", self.open_update),
                 ),
             ),
@@ -110,7 +111,6 @@ class MainWindow:
 
         footer = ttk.Frame(frame)
         footer.grid(row=2, column=0, sticky="ew", pady=(18, 0))
-        ttk.Button(footer, text="Digital Billderを開く", command=self.open_digital_billder).pack(side=tk.LEFT)
         ttk.Button(footer, text="閉じる", command=self.close_window).pack(side=tk.RIGHT)
 
     def close_window(self) -> None:
