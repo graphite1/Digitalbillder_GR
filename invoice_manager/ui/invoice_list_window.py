@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tkinter as tk
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 from tkinter import messagebox, ttk
@@ -245,7 +247,7 @@ class InvoiceListWindow(tk.Toplevel):
         headers = {"billing_month": "請求月", "project_code": "工事コード", "project_name": "工事名",
                    "vendor_name": "取引先", "invoice_date": "請求日",
                    "total_amount": f"請求金額({self.amount_display_var.get()})", "file_count": "添付",
-                   "local_memo": "メモ", "allocation_summary": "工種コード・振分金額(税抜)",
+                   "local_memo": "メモ", "allocation_summary": "工種コード ／ 振分金額(税抜)",
                    "contact_name": "担当者", "email": "メール", "phone": "電話"}
         self.content_panes = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         self.content_panes.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
@@ -254,7 +256,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.content_panes.add(tree_frame, weight=4)
         self.content_panes.add(self.sidebar, weight=1)
         style = ttk.Style(self)
-        style.configure("InvoiceList.Treeview", rowheight=29)
+        style.configure("InvoiceList.Treeview", rowheight=48)
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended",
                                   style="InvoiceList.Treeview",
                                   displaycolumns=self.load_display_columns())
@@ -263,7 +265,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.tree.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
         widths = {"billing_month": 95, "project_name": 230, "vendor_name": 175,
                   "invoice_date": 100, "total_amount": 125, "file_count": 55, "local_memo": 130,
-                  "allocation_summary": 230}
+                  "allocation_summary": 250}
         for column in columns:
             self.tree.heading(column, text=headers[column])
             self.tree.column(column, width=widths.get(column, 120), minwidth=50,
@@ -280,6 +282,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.tree.bind("<ButtonPress-1>", self.on_tree_header_press, add=True)
         self.tree.bind("<B1-Motion>", self.on_tree_header_drag, add=True)
         self.tree.bind("<ButtonRelease-1>", self.on_tree_header_release, add=True)
+        self.tree.bind("<Button-3>", self.on_tree_right_click, add=True)
         self.tree.bind("<MouseWheel>", self.on_tree_mousewheel)
         self.tree.bind("<Shift-MouseWheel>", self.on_tree_shift_mousewheel)
 
@@ -461,14 +464,24 @@ class InvoiceListWindow(tk.Toplevel):
                 amount = self.amount_for_display(int(parts[1]), int(parts[2]))
             except (TypeError, ValueError):
                 continue
-            formatted.append(f"{parts[0]}: {format_amount(amount)}")
-        return " / ".join(formatted)
+            formatted.append(f"{self.display_work_type_code(parts[0])}　{format_amount(amount)}円")
+        return "\n".join(formatted)
+
+    @staticmethod
+    def display_work_type_code(code: str) -> str:
+        """Use the canonical D-prefix for legacy three-digit work-type codes."""
+        normalized = unicodedata.normalize("NFKC", str(code or "").strip())
+        if re.fullmatch(r"[0-9]{3}", normalized):
+            return f"D{normalized}"
+        if re.fullmatch(r"[dD][0-9]{3}", normalized):
+            return f"D{normalized[1:]}"
+        return normalized
 
     def on_amount_display_selected(self, _event=None) -> None:
         mode = self.amount_display_var.get()
         set_app_setting(AMOUNT_DISPLAY_SETTING_KEY, mode)
         self.tree.heading("total_amount", text=f"請求金額({mode})")
-        self.tree.heading("allocation_summary", text=f"工種コード・振分金額({mode})")
+        self.tree.heading("allocation_summary", text=f"工種コード ／ 振分金額({mode})")
         self.refresh()
         for child in self.winfo_children():
             if callable(getattr(child, "set_amount_display_mode", None)):
@@ -514,8 +527,18 @@ class InvoiceListWindow(tk.Toplevel):
     def on_tree_header_release(self, _event=None) -> None:
         self._header_drag_column = None
 
-    def _heading_column_at(self, event) -> str | None:
-        if self.tree.identify_region(event.x, event.y) != "heading":
+    def on_tree_right_click(self, event) -> str | None:
+        item_id = self.tree.identify_row(event.y)
+        if not item_id or self._display_column_at(event) != "local_memo":
+            return None
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        self.on_select()
+        self.open_memo_cell_editor(item_id)
+        return "break"
+
+    def _display_column_at(self, event) -> str | None:
+        if self.tree.identify_region(event.x, event.y) not in {"cell", "heading"}:
             return None
         identifier = self.tree.identify_column(event.x)
         if not identifier.startswith("#"):
@@ -526,6 +549,45 @@ class InvoiceListWindow(tk.Toplevel):
             return None
         columns = tuple(self.tree.cget("displaycolumns"))
         return columns[index] if 0 <= index < len(columns) else None
+
+    def open_memo_cell_editor(self, item_id: str) -> None:
+        bbox = self.tree.bbox(item_id, "local_memo")
+        if not bbox:
+            return
+        existing_editor = getattr(self, "memo_cell_entry", None)
+        if existing_editor is not None and existing_editor.winfo_exists():
+            self.close_memo_cell_editor(False)
+        x, y, width, height = bbox
+        editor = ttk.Entry(self.tree)
+        editor.insert(0, self.tree.set(item_id, "local_memo"))
+        editor.place(x=x, y=y, width=width, height=height)
+        self.memo_cell_entry = editor
+        editor.focus_set()
+        editor.selection_range(0, tk.END)
+        self._memo_cell_item_id = item_id
+        self._memo_cell_edit_completed = False
+        editor.bind("<Return>", lambda _event: self.close_memo_cell_editor(True))
+        editor.bind("<Escape>", lambda _event: self.close_memo_cell_editor(False))
+        editor.bind("<FocusOut>", lambda _event: self.close_memo_cell_editor(True))
+
+    def close_memo_cell_editor(self, save: bool) -> None:
+        if getattr(self, "_memo_cell_edit_completed", True):
+            return
+        self._memo_cell_edit_completed = True
+        editor = getattr(self, "memo_cell_entry", None)
+        item_id = getattr(self, "_memo_cell_item_id", None)
+        if save and editor is not None and editor.winfo_exists() and item_id in self.invoice_ids:
+            memo = editor.get()
+            update_invoice_memo(self.invoice_ids[item_id], memo)
+            self.tree.set(item_id, "local_memo", memo)
+            self.memo_var.set(memo)
+        if editor is not None and editor.winfo_exists():
+            editor.destroy()
+
+    def _heading_column_at(self, event) -> str | None:
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            return None
+        return self._display_column_at(event)
 
     def move_display_column(self, source_column: str, target_column: str) -> None:
         columns = list(self.tree.cget("displaycolumns"))

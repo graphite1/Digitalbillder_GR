@@ -157,8 +157,11 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         self.assertIn("試験担当", self.window.selected_info_var.get())
         self.assertEqual(self.window.memo_var.get(), "合成データのメモ")
         values = self.window.tree.item(item, "values")
-        self.assertEqual(values[8], "D301: 100 / D513: 200")
-        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード・振分金額(税抜)")
+        self.assertEqual(values[8], "D301　100円\nD513　200円")
+        self.assertEqual(self.window.display_work_type_code("590"), "D590")
+        self.assertEqual(self.window.display_work_type_code("d590"), "D590")
+        self.assertEqual(self.window.display_work_type_code("X590"), "X590")
+        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード ／ 振分金額(税抜)")
         self.assertEqual(str(self.window.detail_button["state"]), "normal")
         detail = self.patched("invoice_manager.ui.invoice_detail_window.InvoiceDetailWindow")
         self.window.open_detail()
@@ -170,7 +173,7 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         self.window.on_amount_display_selected()
         existing_detail.set_amount_display_mode.assert_called_once_with("税込")
         self.assertEqual(self.window.tree.heading("total_amount", "text"), "請求金額(税込)")
-        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード・振分金額(税込)")
+        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード ／ 振分金額(税込)")
         self.assertIn("110", self.window.tree.item(self.window.tree.get_children()[0], "values"))
         self.assertIn("税込", self.window.summary_var.get())
 
@@ -184,6 +187,21 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         saved_order = self.save_setting.call_args_list[-1].args
         self.assertEqual(saved_order[0], "invoice_list_column_order")
         self.assertEqual(json.loads(saved_order[1]), list(columns))
+
+    def test_memo_cell_editor_saves_the_right_clicked_invoice_memo(self):
+        item = self.window.tree.get_children()[0]
+        save_memo = self.patched("invoice_manager.ui.invoice_list_window.update_invoice_memo")
+        with patch.object(self.window.tree, "bbox", return_value=(0, 0, 130, 29)):
+            self.window.open_memo_cell_editor(item)
+
+        editor = self.window.memo_cell_entry
+        editor.delete(0, tk.END)
+        editor.insert(0, "右クリックで更新")
+        self.window.close_memo_cell_editor(True)
+
+        save_memo.assert_called_once_with(1, "右クリックで更新")
+        self.assertEqual(self.window.tree.set(item, "local_memo"), "右クリックで更新")
+        self.assertEqual(self.window.memo_var.get(), "右クリックで更新")
 
     def test_non_admin_trial_controls_are_disabled_and_direct_reset_is_rejected(self):
         self.can_use_test_tools.return_value = False
