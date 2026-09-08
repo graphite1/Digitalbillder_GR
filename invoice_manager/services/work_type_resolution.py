@@ -21,6 +21,15 @@ class WorkTypeResolutionError(ValueError):
     """The input cannot identify one project work type safely."""
 
 
+def normalize_budget_work_type_code(value: str) -> str:
+    """Return the budget-only matching key without altering its printed source value."""
+    raw = str(value or "").strip()
+    normalized = unicodedata.normalize("NFKC", raw)
+    if re.fullmatch(r"[0-9]{3}", normalized):
+        return f"D{normalized}"
+    return raw
+
+
 def load_confirmed_work_types(project_id: int) -> tuple[CanonicalWorkType, ...]:
     """Read active archived codes without fetching history or changing its schema."""
     if not db.DB_PATH.exists():

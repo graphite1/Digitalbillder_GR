@@ -28,6 +28,7 @@ from invoice_manager.services.work_type_resolution import (
     CanonicalWorkType,
     WorkTypeResolutionError,
     load_work_type_choices,
+    normalize_budget_work_type_code,
     resolve_from_catalog,
 )
 
@@ -285,7 +286,8 @@ def prepare_budget_rows_from_candidates(
 
     source_candidates = tuple(candidates)
     protected_codes = {
-        _required_text(code, "既存工種コード") for code in existing_codes
+        normalize_budget_work_type_code(_required_text(code, "既存工種コード"))
+        for code in existing_codes
     }
     name_fallbacks = fallback_names or {}
     catalog = load_work_type_choices(project_id) if project_id is not None else ()
@@ -300,18 +302,26 @@ def prepare_budget_rows_from_candidates(
             code = _required_text(candidate.work_type_code, "工種コード")
         except ValueError as exc:
             raise ValueError(f"抽出候補 {location}: {exc}") from exc
-        if code in seen_locations:
+        matching_code = normalize_budget_work_type_code(code)
+        if matching_code in seen_locations:
             raise ValueError(
                 f"抽出候補の工種コードが重複しています: {code} "
-                f"（{seen_locations[code]} / {location}）"
+                f"（{seen_locations[matching_code]} / {location}）"
             )
-        seen_locations[code] = location
+        seen_locations[matching_code] = location
 
         candidate_name = str(candidate.work_type_name or "").strip()
-        fallback_name = str(name_fallbacks.get(code, "") or "").strip()
+        fallback_name = str(
+            name_fallbacks.get(code, name_fallbacks.get(matching_code, "")) or ""
+        ).strip()
         if not candidate_name and not fallback_name and catalog:
             try:
-                fallback_name = resolve_from_catalog(code, catalog).name.strip()
+                if re.fullmatch(r"D[0-9]{3}", matching_code):
+                    fallback_name = next(
+                        (item.name.strip() for item in catalog if item.code == matching_code), ""
+                    )
+                else:
+                    fallback_name = resolve_from_catalog(code, catalog).name.strip()
             except WorkTypeResolutionError:
                 pass
         name = candidate_name or fallback_name
@@ -333,8 +343,14 @@ def prepare_budget_rows_from_candidates(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"抽出候補 {location}（{code}）: {exc}") from exc
 
-    rows = tuple(row for row in prepared if row.work_type_code not in protected_codes)
-    skipped = tuple(row.work_type_code for row in prepared if row.work_type_code in protected_codes)
+    rows = tuple(
+        row for row in prepared
+        if normalize_budget_work_type_code(row.work_type_code) not in protected_codes
+    )
+    skipped = tuple(
+        row.work_type_code for row in prepared
+        if normalize_budget_work_type_code(row.work_type_code) in protected_codes
+    )
     if project_id is not None:
         rows, _ = _suggest_budget_mappings(rows, catalog, existing_actual_codes)
     return rows, skipped
@@ -355,7 +371,12 @@ def _suggest_budget_mappings(
         if row.actual_work_type_code:
             continue
         try:
-            proposals[index] = resolve_from_catalog(row.work_type_code, catalog).code
+            matching_code = normalize_budget_work_type_code(row.work_type_code)
+            proposals[index] = (
+                matching_code
+                if re.fullmatch(r"D[0-9]{3}", matching_code)
+                else resolve_from_catalog(row.work_type_code, catalog).code
+            )
         except WorkTypeResolutionError as exc:
             issues.append(f"{row.work_type_code}: {exc}")
     counts: dict[str, int] = {}
@@ -386,9 +407,10 @@ def _normalize_rows(rows: Iterable[BudgetRowInput | Mapping[str, object]]) -> tu
     seen: set[str] = set()
     duplicates: list[str] = []
     for row in normalized:
-        if row.work_type_code in seen:
+        matching_code = normalize_budget_work_type_code(row.work_type_code)
+        if matching_code in seen:
             duplicates.append(row.work_type_code)
-        seen.add(row.work_type_code)
+        seen.add(matching_code)
     if duplicates:
         raise ValueError(f"工種コードが重複しています: {', '.join(dict.fromkeys(duplicates))}")
     mappings = [row.actual_work_type_code for row in normalized if row.actual_work_type_code]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -606,8 +607,14 @@ class ProjectBudgetWindow(tk.Toplevel):
         text = self.actual_code_var.get().strip()
         if not text:
             return None
-        from invoice_manager.services.work_type_resolution import resolve_work_type_code
+        from invoice_manager.services.work_type_resolution import (
+            normalize_budget_work_type_code,
+            resolve_work_type_code,
+        )
         code = self.code_name_options.get(text, (text.split("｜", 1)[0].strip(), ""))[0]
+        budget_code = normalize_budget_work_type_code(code)
+        if re.fullmatch(r"D[0-9]{3}", budget_code):
+            return budget_code
         project_id = self._project_id()
         if project_id is None:
             raise ValueError("工事を選択してください。")

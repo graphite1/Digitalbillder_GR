@@ -192,28 +192,46 @@ class ProjectBudgetTests(unittest.TestCase):
         self.assertEqual(candidates[0].budget_net, 0)
         self.assertIsNone(candidates[0].scheduled_net)
 
-    def test_actual_prefix_wins_over_local_d_rule_in_budget_proposal(self) -> None:
+    def test_budget_numeric_code_keeps_d_rule_when_history_has_other_prefix(self) -> None:
         repositories.save_work_type_code(self.project_id, "513", "基本科目")
         with patch("invoice_manager.services.work_type_resolution.load_confirmed_work_types",
-                   return_value=(CanonicalWorkType("B513", "正式科目"),)):
+                   return_value=(CanonicalWorkType("X513", "別体系の実績"),)):
             rows, _ = prepare_budget_rows_from_candidates(
-                [self.candidate("５１３", name="")], project_id=self.project_id
+                [self.candidate("５１３", name="原本の舗装工")], project_id=self.project_id
             )
         self.assertEqual(rows[0].work_type_code, "５１３")
-        self.assertEqual(rows[0].actual_work_type_code, "B513")
-        self.assertEqual(rows[0].work_type_name, "正式科目")
+        self.assertEqual(rows[0].actual_work_type_code, "D513")
+        self.assertEqual(rows[0].work_type_name, "原本の舗装工")
 
     def test_unknown_ambiguous_and_competing_budget_codes_remain_unmapped(self) -> None:
         catalog = (CanonicalWorkType("D513", "明細"), CanonicalWorkType("D301", "土木"),
-                   CanonicalWorkType("B301", "建築"))
+                   CanonicalWorkType("X301", "別体系"))
         with patch("invoice_manager.services.project_budget.load_work_type_choices", return_value=catalog):
             rows, issues = suggest_budget_work_type_mappings(
                 self.project_id, [self.row(code) for code in ("999", "301", "513", "D513")]
             )
-        self.assertTrue(all(row.actual_work_type_code is None for row in rows))
-        self.assertEqual(len(issues), 4)
-        self.assertTrue(any("複数" in issue for issue in issues))
+        self.assertEqual([row.actual_work_type_code for row in rows], ["D999", "D301", None, None])
+        self.assertEqual(len(issues), 2)
         self.assertTrue(any("重複" in issue for issue in issues))
+
+    def test_budget_source_d_and_three_digits_are_duplicate_matching_codes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "重複"):
+            prepare_budget_rows_from_candidates([
+                self.candidate("513", location="表1 行2"),
+                self.candidate("D513", location="表1 行3"),
+            ])
+        rows, skipped = prepare_budget_rows_from_candidates(
+            [self.candidate("D513")], existing_codes=("５１３",)
+        )
+        self.assertEqual(rows, ())
+        self.assertEqual(skipped, ("D513",))
+
+        with self.assertRaisesRegex(ValueError, "重複"):
+            save_project_budget(
+                self.project_id,
+                [self.row("513"), self.row("D513")],
+                confirmed=True,
+            )
 
     def test_budget_mapping_preserves_explicit_choice_and_reserves_it(self) -> None:
         repositories.save_work_type_code(self.project_id, "513", "明細")
