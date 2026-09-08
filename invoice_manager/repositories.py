@@ -850,7 +850,16 @@ def restore_deleted_invoices(history_ids: list[int]) -> tuple[int, list[str]]:
         _validate_deleted_snapshot(snapshot)
         snapshots.append((row, snapshot))
 
-    missing_files = _restore_deleted_invoice_files(snapshots)
+    with get_connection() as conn:
+        duplicate_ids = [
+            snapshot["invoice"]["external_id"]
+            for _history, snapshot in snapshots
+            if conn.execute("SELECT 1 FROM invoices WHERE external_id = ?", (snapshot["invoice"]["external_id"],)).fetchone()
+        ]
+    if duplicate_ids:
+        raise ValueError(f"請求ID {duplicate_ids[0]} は既に登録されています。")
+
+    missing_files, copied_paths = _restore_deleted_invoice_files(snapshots)
     try:
         with get_connection() as conn:
             for history, snapshot in snapshots:
@@ -863,6 +872,7 @@ def restore_deleted_invoices(history_ids: list[int]) -> tuple[int, list[str]]:
                     (now_text(), invoice_id, int(history["id"])),
                 )
     except Exception:
+        _remove_restored_files(copied_paths)
         raise
     add_audit_log("削除請求を復元", "deleted_invoices", None, f"{len(ids)}件")
     return len(ids), missing_files
@@ -972,8 +982,9 @@ def _validate_deleted_snapshot(snapshot: dict) -> None:
         raise ValueError("削除履歴の内容が不正です。")
 
 
-def _restore_deleted_invoice_files(snapshots: list[tuple]) -> list[str]:
+def _restore_deleted_invoice_files(snapshots: list[tuple]) -> tuple[list[str], list[Path]]:
     missing: list[str] = []
+    copied: list[Path] = []
     originals = (db.DATA_DIR / "originals").resolve()
     for _history, snapshot in snapshots:
         trash_root = _deleted_files_root(snapshot["storage_key"])
@@ -992,8 +1003,22 @@ def _restore_deleted_invoice_files(snapshots: list[tuple]) -> list[str]:
                 file["restored_path"] = str(target)
             if not target.exists():
                 shutil.copy2(source, target)
+                copied.append(target)
             file["restored_path"] = str(target)
-    return missing
+    return missing, copied
+
+
+def _remove_restored_files(paths: list[Path]) -> None:
+    originals = (db.DATA_DIR / "originals").resolve()
+    for path in reversed(paths):
+        path.unlink(missing_ok=True)
+        current = path.parent
+        while current != originals and current.is_relative_to(originals):
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
 
 def _restore_deleted_invoice_record(conn, snapshot: dict) -> int:

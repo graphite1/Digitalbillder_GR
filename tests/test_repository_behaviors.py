@@ -208,6 +208,31 @@ class RepositoryBehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "復元済み"):
             repositories.restore_deleted_invoices([history_id])
 
+    def test_duplicate_restore_is_rejected_before_any_pdf_is_copied(self) -> None:
+        batch_id = repositories.create_import_batch(
+            "2026-09", Path("source.csv"), Path("source.zip"), "csv-hash", "zip-hash", ""
+        )
+        invoice_id = repositories.insert_invoice(make_row("RESTORE-DUPLICATE"), "2026-09", batch_id)
+        original = db.DATA_DIR / "originals" / "2026" / "09" / "RESTORE-DUPLICATE" / "invoice.pdf"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(b"%PDF-1.4\nduplicate\n")
+        self.assertTrue(repositories.insert_invoice_file(invoice_id, "invoice.pdf", original, "pdf", "b" * 64, original.stat().st_size))
+        repositories.delete_invoices([invoice_id])
+        history_id = int(repositories.list_deleted_invoices()[0]["id"])
+        project_id = repositories.get_or_create_project("P001", "工事A")
+        vendor_id = repositories.get_or_create_vendor("取引先A")
+        with db.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO invoices (external_id,project_id,vendor_id,invoice_date,billing_month,total_amount,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                ("RESTORE-DUPLICATE", project_id, vendor_id, "2026-08-20", "2026-09", 110_000, "2026-09-09", "2026-09-09"),
+            )
+
+        with self.assertRaisesRegex(ValueError, "既に登録"):
+            repositories.restore_deleted_invoices([history_id])
+
+        self.assertFalse(original.exists())
+
     def test_import_history_keeps_completion_snapshot(self) -> None:
         batch_id = repositories.create_import_batch(
             "2026-09",
