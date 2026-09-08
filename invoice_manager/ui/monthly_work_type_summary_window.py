@@ -11,6 +11,26 @@ from invoice_manager.services.actual_ledger import (
 from invoice_manager.utils.money_utils import format_amount
 
 
+TABLE_COLUMNS = ("code", "name", "invoice_count", "line_count", "net")
+TABLE_HEADINGS = {
+    "code": "工種コード", "name": "工種名", "invoice_count": "請求書数",
+    "line_count": "振分行数", "net": "振分金額(税抜)",
+}
+
+
+def monthly_actuals_tsv(rows) -> str:
+    """Format the displayed matrix as Excel-friendly tab-separated values."""
+    lines = ["\t".join(TABLE_HEADINGS[column] for column in TABLE_COLUMNS)]
+    lines.extend(
+        "\t".join((
+            str(row.work_type_code), str(row.work_type_name), str(row.invoice_count),
+            str(row.allocation_line_count), str(row.net_amount),
+        ))
+        for row in rows
+    )
+    return "\n".join(lines)
+
+
 class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
     """Read-only monthly work-type summary sourced from common actuals."""
 
@@ -22,7 +42,9 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
         self.project_var = tk.StringVar()
         self.month_var = tk.StringVar()
         self.summary_var = tk.StringVar()
+        self.copy_status_var = tk.StringVar()
         self.project_ids: dict[str, int] = {}
+        self.current_rows = ()
         self._build()
         self.reload_projects()
 
@@ -41,21 +63,17 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
         self.month_combo = ttk.Combobox(filters, textvariable=self.month_var, state="readonly", width=14)
         self.month_combo.grid(row=1, column=1, sticky=tk.W, padx=(0, 10))
         ttk.Button(filters, text="表示を更新", command=self.refresh).grid(row=1, column=2, sticky=tk.W)
+        ttk.Button(filters, text="表をコピー", command=self.copy_table).grid(row=1, column=3, sticky=tk.W, padx=(8, 0))
         filters.columnconfigure(0, weight=1)
         self.project_combo.bind("<<ComboboxSelected>>", lambda _event: self.reload_months())
         self.month_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
-        columns = ("code", "name", "invoice_count", "line_count", "net")
         frame = ttk.Frame(self, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings")
-        headings = {
-            "code": "工種コード", "name": "工種名", "invoice_count": "請求書数",
-            "line_count": "振分行数", "net": "振分金額(税抜)",
-        }
+        self.tree = ttk.Treeview(frame, columns=TABLE_COLUMNS, show="headings")
         widths = {"code": 130, "name": 280, "invoice_count": 100, "line_count": 100, "net": 180}
-        for column in columns:
-            self.tree.heading(column, text=headings[column])
+        for column in TABLE_COLUMNS:
+            self.tree.heading(column, text=TABLE_HEADINGS[column])
             self.tree.column(column, width=widths[column], anchor=tk.E if column in {"invoice_count", "line_count", "net"} else tk.W)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -63,7 +81,8 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
         scrollbar.grid(row=0, column=1, sticky=tk.NS)
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        ttk.Label(self, textvariable=self.summary_var, padding=(12, 0, 12, 12)).pack(anchor=tk.W)
+        ttk.Label(self, textvariable=self.summary_var, padding=(12, 0, 12, 4)).pack(anchor=tk.W)
+        ttk.Label(self, textvariable=self.copy_status_var, padding=(12, 0, 12, 12)).pack(anchor=tk.W)
 
     def reload_projects(self) -> None:
         self.project_ids = {
@@ -84,12 +103,15 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
 
     def refresh(self) -> None:
         self.tree.delete(*self.tree.get_children())
+        self.current_rows = ()
+        self.copy_status_var.set("")
         project_id = self.project_ids.get(self.project_var.get())
         billing_month = self.month_var.get()
         if not project_id or not billing_month:
             self.summary_var.set("実績に対象工事または請求月がありません。")
             return
         rows = list_monthly_actual_work_type_summary(project_id, billing_month)
+        self.current_rows = rows
         net_total = 0
         for row in rows:
             net_total += row.net_amount
@@ -101,3 +123,12 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
             f"{billing_month}: {len(rows)}工種　振分合計（税抜）{format_amount(net_total)}円"
             if rows else f"{billing_month}: 実績の振分データはありません。"
         )
+
+    def copy_table(self) -> None:
+        if not self.current_rows:
+            self.copy_status_var.set("コピーする実績がありません。")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(monthly_actuals_tsv(self.current_rows))
+        self.update()
+        self.copy_status_var.set("表をコピーしました。Excelで貼り付けできます。")
