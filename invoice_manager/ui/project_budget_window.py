@@ -123,6 +123,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         ttk.Label(top, textvariable=self.source_var).pack(side=tk.LEFT, padx=8)
 
         source_frame = ttk.LabelFrame(self, text="2ページ目の抽出候補（親集計と明細の二重計上に注意）", padding=6)
+        self.source_frame = source_frame
         source_frame.grid(row=1, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
         source_frame.columnconfigure(0, weight=1)
         source_table = ttk.Frame(source_frame)
@@ -158,6 +159,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.source_panel = ActivityPanel(source_frame, activity=self.source_activity)
         self.source_panel.grid(row=0, column=0, sticky=tk.EW)
         self.source_panel.grid_remove()
+        self.source_frame.grid_remove()
         ttk.Label(status_frame, textvariable=self.batch_status_var, padding=(8, 0, 8, 6), wraplength=950).pack(fill=tk.X)
         editor = ttk.LabelFrame(self, text="登録行の編集", padding=7)
         editor.grid(row=3, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
@@ -197,16 +199,14 @@ class ProjectBudgetWindow(tk.Toplevel):
         row_table.pack(fill=tk.BOTH, expand=True)
         self.row_tree = ttk.Treeview(
             row_table,
-            columns=("include", "source_code", "name", "budget", "scheduled", "remaining", "actual_code", "original"),
+            columns=("include", "source_code", "name", "budget", "actual_code"),
             show="headings", height=8,
         )
         row_headings = {
             "include": "集計", "source_code": "原本コード", "name": "科目", "budget": "実行予算",
-            "scheduled": "予定金額", "remaining": "残工事見込", "actual_code": "Web工種対応",
-            "original": "抽出時の原本値",
+            "actual_code": "Web工種対応",
         }
-        row_widths = {"include": 55, "source_code": 100, "name": 170, "budget": 110, "scheduled": 110,
-                      "remaining": 115, "actual_code": 125, "original": 220}
+        row_widths = {"include": 55, "source_code": 120, "name": 250, "budget": 150, "actual_code": 160}
         for column, label in row_headings.items():
             self.row_tree.heading(column, text=label)
             self.row_tree.column(column, width=row_widths[column], anchor=tk.E if column in {"budget", "scheduled", "remaining"} else tk.W)
@@ -265,6 +265,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.row_tree.delete(*self.row_tree.get_children())
         self.candidate_tree.delete(*self.candidate_tree.get_children())
         self.candidate_values.clear()
+        self.source_frame.grid_remove()
         self.source_preview = None
         self.source_path = None
         self.stored_source_path = None
@@ -346,6 +347,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.save_button.configure(state=tk.DISABLED)
         self.source_activity.title = f"予算原本の読取：{self.project_var.get()}"
         self.source_activity.start("原本解析を開始しています。ほかの画面も操作できます。", cancellation=token)
+        self.source_frame.grid()
         self.source_table.grid_remove()
         self.source_panel.grid()
 
@@ -460,6 +462,10 @@ class ProjectBudgetWindow(tk.Toplevel):
             raise
         self.candidate_values.clear()
         self.candidate_values.update(added)
+        if prepared:
+            self.source_frame.grid()
+        else:
+            self.source_frame.grid_remove()
 
     def _add_all_candidates(self) -> None:
         self._add_candidates(self.candidate_tree.get_children())
@@ -660,15 +666,10 @@ class ProjectBudgetWindow(tk.Toplevel):
 
     def _render_row(self, item: str) -> None:
         row = self.row_values[item]
-        source = row.get("source_candidate")
-        original = "手入力"
-        if isinstance(source, ExtractedBudgetCandidate):
-            original = f"{source.work_type_code} / {_amount_text(source.budget_net)} / {_amount_text(source.scheduled_net)}"
         self.row_tree.item(item, values=(
             "含む" if row["include_in_total"] else "除外",
             row["work_type_code"], row["work_type_name"], _amount_text(row["budget_net"]),
-            _amount_text(row["scheduled_net"]), _amount_text(row["remaining_net"]),
-            row["actual_work_type_code"] or "未対応", original,
+            row["actual_work_type_code"] or "未対応",
         ))
 
     def _edit_current_row(self) -> None:
