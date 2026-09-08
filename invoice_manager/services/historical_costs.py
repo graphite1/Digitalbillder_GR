@@ -145,6 +145,18 @@ class HistoricalCostFilterOptions:
     work_types: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MonthlyArchivedWorkTypeSummaryRow:
+    """Read-only monthly aggregation of the archived Digital Billder cache."""
+
+    work_type_code: str
+    work_type_name: str
+    invoice_count: int
+    allocation_line_count: int
+    net_amount: int
+    gross_amount: int
+
+
 _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS historical_archived_invoices (
@@ -623,6 +635,70 @@ def list_actual_costs(
             params,
         ).fetchall()
     return [_cost_row(ACTUAL_SOURCE, row) for row in rows]
+
+
+def list_archived_billing_months(project_code: str) -> tuple[str, ...]:
+    """Return months derived from archived invoice dates without changing the archive."""
+    project_code = _required_text(project_code, "工事コード")
+    with db.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT substr(invoice_date, 1, 7) AS billing_month
+            FROM historical_archived_invoices
+            WHERE source = 'digital_billder'
+              AND status = 'archived'
+              AND is_active = 1
+              AND project_code = ?
+              AND length(invoice_date) >= 7
+            ORDER BY billing_month DESC
+            """,
+            (project_code,),
+        ).fetchall()
+    return tuple(str(row["billing_month"]) for row in rows)
+
+
+def list_monthly_archived_work_type_summary(
+    project_code: str,
+    billing_month: str,
+) -> list[MonthlyArchivedWorkTypeSummaryRow]:
+    """Aggregate one project's archived allocations for one invoice-date month, read-only."""
+    project_code = _required_text(project_code, "工事コード")
+    billing_month = _required_text(billing_month, "請求月")
+    if len(billing_month) != 7 or billing_month[4] != "-" or not billing_month.replace("-", "").isdigit():
+        raise ValueError("請求月はYYYY-MM形式で指定してください。")
+    with db.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                a.work_type_code,
+                a.work_type_name,
+                COUNT(DISTINCT i.id) AS invoice_count,
+                COUNT(a.id) AS allocation_line_count,
+                SUM(a.net_amount) AS net_amount,
+                SUM(a.gross_amount) AS gross_amount
+            FROM historical_archived_allocations AS a
+            JOIN historical_archived_invoices AS i ON i.id = a.historical_invoice_id
+            WHERE i.source = 'digital_billder'
+              AND i.status = 'archived'
+              AND i.is_active = 1
+              AND i.project_code = ?
+              AND substr(i.invoice_date, 1, 7) = ?
+            GROUP BY a.work_type_code, a.work_type_name
+            ORDER BY a.work_type_code, a.work_type_name
+            """,
+            (project_code, billing_month),
+        ).fetchall()
+    return [
+        MonthlyArchivedWorkTypeSummaryRow(
+            work_type_code=str(row["work_type_code"]),
+            work_type_name=str(row["work_type_name"]),
+            invoice_count=int(row["invoice_count"]),
+            allocation_line_count=int(row["allocation_line_count"]),
+            net_amount=int(row["net_amount"] or 0),
+            gross_amount=int(row["gross_amount"] or 0),
+        )
+        for row in rows
+    ]
 
 
 def list_planned_costs(

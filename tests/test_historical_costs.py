@@ -185,6 +185,21 @@ class HistoricalCostsTests(unittest.TestCase):
             [("任意-A", "10", 100), ("任意-A", "8", 160), ("X/非課税", "exempt", 0)],
         )
 
+    def test_monthly_work_type_summary_uses_only_the_selected_archived_month_and_project(self) -> None:
+        history.upsert_archived_invoice(snapshot("june-1", allocation("D301", 100), allocation("D607", 200), invoice_date="2026-06-30"))
+        history.upsert_archived_invoice(snapshot("june-2", allocation("D301", 300), invoice_date="2026-06-15"))
+        history.upsert_archived_invoice(snapshot("july", allocation("D301", 999), invoice_date="2026-07-01"))
+        history.upsert_archived_invoice(snapshot("other", allocation("D301", 888), project_code="P002", invoice_date="2026-06-30"))
+
+        months = history.list_archived_billing_months("P001")
+        rows = history.list_monthly_archived_work_type_summary("P001", "2026-06")
+
+        self.assertEqual(months, ("2026-07", "2026-06"))
+        self.assertEqual(
+            [(row.work_type_code, row.invoice_count, row.allocation_line_count, row.net_amount, row.gross_amount) for row in rows],
+            [("D301", 2, 2, 400, 440), ("D607", 1, 1, 200, 220)],
+        )
+
     def test_active_cache_excludes_inactive_and_remains_idempotent(self) -> None:
         first = snapshot("first", allocation("01", 100))
         second = snapshot("second", allocation("02", 200))

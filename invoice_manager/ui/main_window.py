@@ -84,6 +84,7 @@ class MainWindow:
                 "集計・予算",
                 (
                     ("保管済み履歴・工事別実績", self.open_historical_costs),
+                    ("月別工種振分集計（試験）", self.open_monthly_work_type_summary),
                     ("工事予算・着地見込", self.open_project_budget),
                     ("Excel出力", self.export_excel),
                 ),
@@ -165,6 +166,11 @@ class MainWindow:
         from invoice_manager.ui.project_budget_window import ProjectBudgetWindow
 
         ProjectBudgetWindow(self.root)
+
+    def open_monthly_work_type_summary(self) -> None:
+        from invoice_manager.ui.monthly_work_type_summary_window import MonthlyWorkTypeSummaryWindow
+
+        MonthlyWorkTypeSummaryWindow(self.root)
 
     def open_import_history(self) -> None:
         from invoice_manager.ui.import_history_window import ImportHistoryWindow
