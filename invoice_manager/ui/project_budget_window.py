@@ -241,8 +241,9 @@ class ProjectBudgetWindow(tk.Toplevel):
         forecast_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.forecast_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.forecast_tree.configure(xscrollcommand=forecast_xscroll.set, yscrollcommand=forecast_scroll.set)
-        self.chart = tk.Canvas(forecast, width=365, height=125, background="white", highlightthickness=1)
-        self.chart.grid(row=0, column=1, sticky=tk.NS, padx=(8, 0))
+        ttk.Button(forecast, text="予算残高を大きく表示", command=self._open_balance_window).grid(
+            row=0, column=1, sticky=tk.N, padx=(8, 0)
+        )
 
         bottom = ttk.Frame(self, padding=(8, 0, 8, 8))
         bottom.grid(row=6, column=0, sticky=tk.EW)
@@ -752,14 +753,13 @@ class ProjectBudgetWindow(tk.Toplevel):
 
     def _refresh_forecast(self) -> None:
         self.forecast_tree.delete(*self.forecast_tree.get_children())
-        self.chart.delete("all")
         project_id = self._project_id()
         if project_id is None:
             return
         try:
             summary = build_budget_consumption(project_id)
         except Exception as exc:
-            self.chart.create_text(10, 15, anchor=tk.NW, text=f"実績読込エラー: {exc}", fill="#a00000")
+            messagebox.showerror("消化状況", f"実績を読み込めません: {exc}", parent=self)
             return
         for row in summary.rows:
             self.forecast_tree.insert("", tk.END, values=(
@@ -769,27 +769,13 @@ class ProjectBudgetWindow(tk.Toplevel):
                 "-" if row.utilization_rate is None else f"{row.utilization_rate * 100:.1f}%",
                 row.unconfirmed_invoice_count,
             ))
-        self._draw_chart(summary)
 
-    def _draw_chart(self, summary) -> None:
-        width = max(self.chart.winfo_width(), 365) - 20
-        rows = list(summary.rows)
-        total_budget = sum(row.budget_net for row in rows)
-        actual = sum(row.actual_net for row in rows)
-        self.chart.create_text(10, 10, anchor=tk.NW, text="予算: 枠線 / 確認済み実績: 塗りつぶし")
-        if total_budget:
-            x = 10.0
-            for row in rows:
-                segment = width * row.budget_net / total_budget
-                self.chart.create_rectangle(x, 32, x + segment, 58, outline="#222222")
-                used = segment if row.budget_net <= 0 else segment * min(1, row.actual_net / row.budget_net)
-                self.chart.create_rectangle(x, 32, x + used, 58, fill="#4e79a7", outline="")
-                x += segment
-            self.chart.create_text(10, 64, anchor=tk.NW, text=f"予算 {_amount_text(total_budget)} 円 / 確認済み実績 {_amount_text(actual)} 円 / 残額 {_amount_text(total_budget - actual)} 円")
-        else:
-            self.chart.create_text(10, 34, anchor=tk.NW, text="集計対象行がありません。", fill="#777777")
-        if summary.unconfirmed_invoices:
-            self.chart.create_text(10, 96, anchor=tk.NW, text=f"未確認 {len(summary.unconfirmed_invoices)}件は予算消化額に含めていません。", fill="#9a4d00")
+    def _open_balance_window(self) -> None:
+        project_id = self._project_id()
+        if project_id is None:
+            return
+        from invoice_manager.ui.budget_balance_window import BudgetBalanceWindow
+        BudgetBalanceWindow(self, project_id, self.project_var.get())
 
     def _open_source(self) -> None:
         path = self.source_path or self.stored_source_path
