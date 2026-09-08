@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import tkinter as tk
@@ -48,6 +49,7 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         return dict(id=identifier, billing_month=month, project_code="P001", project_name="試験工事",
                     vendor_name="試験取引先", invoice_date="2026-08-31", total_amount=110,
                     total_amount_excluded=100, file_count=1, local_memo="合成データのメモ",
+                    allocation_summary="D301\x1f110\x1f100\x1eD513\x1f220\x1f200",
                     contact_name="試験担当", email="test@example.invalid", phone="000-0000")
 
     def pump_until(self, condition):
@@ -152,7 +154,11 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         self.window.on_select()
         self.assertIn("試験取引先", self.window.selected_info_var.get())
         self.assertIn("工事コード: P001", self.window.selected_info_var.get())
+        self.assertIn("試験担当", self.window.selected_info_var.get())
         self.assertEqual(self.window.memo_var.get(), "合成データのメモ")
+        values = self.window.tree.item(item, "values")
+        self.assertEqual(values[8], "D301: 100 / D513: 200")
+        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード・振分金額(税抜)")
         self.assertEqual(str(self.window.detail_button["state"]), "normal")
         detail = self.patched("invoice_manager.ui.invoice_detail_window.InvoiceDetailWindow")
         self.window.open_detail()
@@ -164,8 +170,20 @@ class InvoiceWorkspaceUiTests(unittest.TestCase):
         self.window.on_amount_display_selected()
         existing_detail.set_amount_display_mode.assert_called_once_with("税込")
         self.assertEqual(self.window.tree.heading("total_amount", "text"), "請求金額(税込)")
+        self.assertEqual(self.window.tree.heading("allocation_summary", "text"), "工種コード・振分金額(税込)")
         self.assertIn("110", self.window.tree.item(self.window.tree.get_children()[0], "values"))
         self.assertIn("税込", self.window.summary_var.get())
+
+    def test_visible_columns_can_be_reordered_and_saved(self):
+        self.window.move_display_column("local_memo", "billing_month")
+
+        columns = tuple(self.window.tree.cget("displaycolumns"))
+
+        self.assertEqual(columns[0], "local_memo")
+        self.assertEqual(columns[-1], "allocation_summary")
+        saved_order = self.save_setting.call_args_list[-1].args
+        self.assertEqual(saved_order[0], "invoice_list_column_order")
+        self.assertEqual(json.loads(saved_order[1]), list(columns))
 
     def test_non_admin_trial_controls_are_disabled_and_direct_reset_is_rejected(self):
         self.can_use_test_tools.return_value = False

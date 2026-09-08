@@ -142,6 +142,24 @@ class RepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual(WORK_TYPE_CODE_NAMES["301"], WORK_TYPE_CODE_NAMES["D301"])
         self.assertEqual(WORK_TYPE_CODE_ORDERS["301"], WORK_TYPE_CODE_ORDERS["D301"])
 
+    def test_invoice_list_includes_work_type_codes_and_allocated_amounts(self) -> None:
+        batch_id = repositories.create_import_batch(
+            "2026-09", Path("source.csv"), Path("source.zip"), "csv-hash", "zip-hash", ""
+        )
+        invoice_id = repositories.insert_invoice(make_row("ALLOCATED"), "2026-09", batch_id)
+        project_id = repositories.get_or_create_project("P001", "工事A")
+        first_code = repositories.save_work_type_code(project_id, "D301", "保険料")
+        second_code = repositories.save_work_type_code(project_id, "D513", "仮設費")
+        repositories.save_invoice_allocation(invoice_id, first_code, 110, sort_order=2)
+        repositories.save_invoice_allocation(invoice_id, second_code, 220, sort_order=1)
+
+        row = next(row for row in repositories.list_invoices() if row["id"] == invoice_id)
+
+        self.assertEqual(
+            row["allocation_summary"],
+            "D513\x1f242\x1f220\x1eD301\x1f121\x1f110",
+        )
+
     def test_import_history_keeps_completion_snapshot(self) -> None:
         batch_id = repositories.create_import_batch(
             "2026-09",

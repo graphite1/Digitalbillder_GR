@@ -619,6 +619,18 @@ def list_invoices(filters: dict[str, str] | None = None) -> list:
             invoices.total_amount,
             invoices.total_amount_excluded,
             COALESCE(invoices.local_memo, '') AS local_memo,
+            COALESCE((
+                SELECT GROUP_CONCAT(allocation_text, char(30))
+                FROM (
+                    SELECT
+                        work_type_codes.code || char(31) || invoice_allocations.amount || char(31) ||
+                        COALESCE(invoice_allocations.amount_excluded, invoice_allocations.amount) AS allocation_text
+                    FROM invoice_allocations
+                    JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+                    WHERE invoice_allocations.invoice_id = invoices.id
+                    ORDER BY invoice_allocations.sort_order ASC, invoice_allocations.id ASC
+                )
+            ), '') AS allocation_summary,
             COUNT(invoice_files.id) AS file_count
         FROM invoices
         JOIN projects ON projects.id = invoices.project_id

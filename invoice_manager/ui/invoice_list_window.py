@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tkinter as tk
 from collections.abc import Callable
@@ -34,6 +35,11 @@ from invoice_manager.services.test_tools_access import can_use_test_tools, requi
 AMOUNT_DISPLAY_SETTING_KEY = "amount_display_mode"
 AMOUNT_DISPLAY_MODES = ("税抜", "税込")
 PROJECT_SELECTION_SETTING_KEY = "selected_project_id"
+INVOICE_LIST_COLUMN_ORDER_SETTING_KEY = "invoice_list_column_order"
+INVOICE_LIST_DISPLAY_COLUMNS = (
+    "billing_month", "project_name", "vendor_name", "invoice_date",
+    "total_amount", "file_count", "local_memo", "allocation_summary",
+)
 
 
 def billing_month_row_tags(months) -> dict[str, str]:
@@ -235,11 +241,12 @@ class InvoiceListWindow(tk.Toplevel):
 
     def _build_tree(self) -> None:
         columns = ("billing_month", "project_code", "project_name", "vendor_name", "invoice_date",
-                   "total_amount", "file_count", "local_memo", "contact_name", "email", "phone")
+                   "total_amount", "file_count", "local_memo", "allocation_summary", "contact_name", "email", "phone")
         headers = {"billing_month": "請求月", "project_code": "工事コード", "project_name": "工事名",
                    "vendor_name": "取引先", "invoice_date": "請求日",
                    "total_amount": f"請求金額({self.amount_display_var.get()})", "file_count": "添付",
-                   "local_memo": "メモ", "contact_name": "担当者", "email": "メール", "phone": "電話"}
+                   "local_memo": "メモ", "allocation_summary": "工種コード・振分金額(税抜)",
+                   "contact_name": "担当者", "email": "メール", "phone": "電話"}
         self.content_panes = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         self.content_panes.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
         tree_frame = ttk.Frame(self.content_panes)
@@ -249,14 +256,14 @@ class InvoiceListWindow(tk.Toplevel):
         style = ttk.Style(self)
         style.configure("InvoiceList.Treeview", rowheight=29)
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended",
-                                 style="InvoiceList.Treeview",
-                                 displaycolumns=("billing_month", "project_name", "vendor_name", "invoice_date",
-                                                 "total_amount", "file_count", "local_memo"))
+                                  style="InvoiceList.Treeview",
+                                  displaycolumns=self.load_display_columns())
         y_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         x_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
         widths = {"billing_month": 95, "project_name": 230, "vendor_name": 175,
-                  "invoice_date": 100, "total_amount": 125, "file_count": 55, "local_memo": 130}
+                  "invoice_date": 100, "total_amount": 125, "file_count": 55, "local_memo": 130,
+                  "allocation_summary": 230}
         for column in columns:
             self.tree.heading(column, text=headers[column])
             self.tree.column(column, width=widths.get(column, 120), minwidth=50,
@@ -270,6 +277,9 @@ class InvoiceListWindow(tk.Toplevel):
         tree_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<ButtonPress-1>", self.on_tree_header_press, add=True)
+        self.tree.bind("<B1-Motion>", self.on_tree_header_drag, add=True)
+        self.tree.bind("<ButtonRelease-1>", self.on_tree_header_release, add=True)
         self.tree.bind("<MouseWheel>", self.on_tree_mousewheel)
         self.tree.bind("<Shift-MouseWheel>", self.on_tree_shift_mousewheel)
 
@@ -421,6 +431,7 @@ class InvoiceListWindow(tk.Toplevel):
                     format_amount(display_amount),
                     row["file_count"],
                     row["local_memo"],
+                    self.format_allocation_summary(row["allocation_summary"]),
                     row["contact_name"],
                     row["email"],
                     row["phone"],
@@ -439,10 +450,25 @@ class InvoiceListWindow(tk.Toplevel):
             return int(amount_excluded)
         return tax_excluded_amount(amount)
 
+    def format_allocation_summary(self, summary: str) -> str:
+        """Format the compact allocation data returned with an invoice-list row."""
+        formatted = []
+        for allocation in str(summary or "").split("\x1e"):
+            parts = allocation.split("\x1f")
+            if len(parts) != 3 or not parts[0]:
+                continue
+            try:
+                amount = self.amount_for_display(int(parts[1]), int(parts[2]))
+            except (TypeError, ValueError):
+                continue
+            formatted.append(f"{parts[0]}: {format_amount(amount)}")
+        return " / ".join(formatted)
+
     def on_amount_display_selected(self, _event=None) -> None:
         mode = self.amount_display_var.get()
         set_app_setting(AMOUNT_DISPLAY_SETTING_KEY, mode)
         self.tree.heading("total_amount", text=f"請求金額({mode})")
+        self.tree.heading("allocation_summary", text=f"工種コード・振分金額({mode})")
         self.refresh()
         for child in self.winfo_children():
             if callable(getattr(child, "set_amount_display_mode", None)):
@@ -464,6 +490,52 @@ class InvoiceListWindow(tk.Toplevel):
         units = -5 if event.delta > 0 else 5
         self.tree.xview_scroll(units, "units")
         return "break"
+
+    def load_display_columns(self) -> tuple[str, ...]:
+        saved = get_app_setting(INVOICE_LIST_COLUMN_ORDER_SETTING_KEY)
+        try:
+            columns = tuple(json.loads(saved))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return INVOICE_LIST_DISPLAY_COLUMNS
+        if len(columns) != len(INVOICE_LIST_DISPLAY_COLUMNS) or set(columns) != set(INVOICE_LIST_DISPLAY_COLUMNS):
+            return INVOICE_LIST_DISPLAY_COLUMNS
+        return columns
+
+    def on_tree_header_press(self, event) -> None:
+        self._header_drag_column = self._heading_column_at(event)
+
+    def on_tree_header_drag(self, event) -> None:
+        source_column = getattr(self, "_header_drag_column", None)
+        target_column = self._heading_column_at(event)
+        if source_column and target_column and source_column != target_column:
+            self.move_display_column(source_column, target_column)
+            self._header_drag_column = source_column
+
+    def on_tree_header_release(self, _event=None) -> None:
+        self._header_drag_column = None
+
+    def _heading_column_at(self, event) -> str | None:
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            return None
+        identifier = self.tree.identify_column(event.x)
+        if not identifier.startswith("#"):
+            return None
+        try:
+            index = int(identifier[1:]) - 1
+        except ValueError:
+            return None
+        columns = tuple(self.tree.cget("displaycolumns"))
+        return columns[index] if 0 <= index < len(columns) else None
+
+    def move_display_column(self, source_column: str, target_column: str) -> None:
+        columns = list(self.tree.cget("displaycolumns"))
+        if source_column not in columns or target_column not in columns or source_column == target_column:
+            return
+        target_index = columns.index(target_column)
+        columns.remove(source_column)
+        columns.insert(target_index, source_column)
+        self.tree.configure(displaycolumns=columns)
+        set_app_setting(INVOICE_LIST_COLUMN_ORDER_SETTING_KEY, json.dumps(columns, ensure_ascii=False))
 
     def _update_action_state(self) -> None:
         has_selection = bool(self.tree.selection())
@@ -501,7 +573,7 @@ class InvoiceListWindow(tk.Toplevel):
         self.selected_info_var.set(
             f"選択: {len(selection)}件\n\n{values[3]}\n{values[2]}\n工事コード: {values[1]}\n\n"
             f"請求月: {values[0]}\n請求日: {values[4]}\n金額({self.amount_display_var.get()}): {values[5]}円\n\n"
-            f"担当者: {values[8]}\n{values[9]}\n{values[10]}"
+            f"担当者: {values[9]}\n{values[10]}\n{values[11]}"
         )
         self.memo_var.set(values[7])
         self._update_action_state()
