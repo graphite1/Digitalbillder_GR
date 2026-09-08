@@ -226,6 +226,28 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS deleted_invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_invoice_id INTEGER NOT NULL,
+    external_id TEXT NOT NULL,
+    project_code TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    vendor_name TEXT NOT NULL,
+    invoice_date TEXT NOT NULL,
+    billing_month TEXT NOT NULL,
+    total_amount INTEGER NOT NULL,
+    total_amount_excluded INTEGER,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    storage_key TEXT NOT NULL UNIQUE,
+    snapshot_json TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    restored_at TEXT,
+    restored_invoice_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_deleted_invoices_deleted_at
+ON deleted_invoices(deleted_at DESC);
+
 CREATE TABLE IF NOT EXISTS web_allocation_guard (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     state TEXT NOT NULL CHECK(state IN ('unverified', 'ready', 'frozen')),

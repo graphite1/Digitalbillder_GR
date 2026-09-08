@@ -160,6 +160,54 @@ class RepositoryBehaviorTests(unittest.TestCase):
             "D513\x1f242\x1f220\x1eD301\x1f121\x1f110",
         )
 
+    def test_deleted_invoice_history_restores_selected_invoice_with_pdf_and_allocations(self) -> None:
+        batch_id = repositories.create_import_batch(
+            "2026-09", Path("source.csv"), Path("source.zip"), "csv-hash", "zip-hash", ""
+        )
+        invoice_id = repositories.insert_invoice(make_row("DELETE-RESTORE"), "2026-09", batch_id)
+        project_id = repositories.get_or_create_project("P001", "工事A")
+        code_id = repositories.save_work_type_code(project_id, "D301", "仮設工")
+        allocation_id = repositories.save_invoice_allocation(invoice_id, code_id, 10_000, memo="復元対象")
+        original = db.DATA_DIR / "originals" / "2026" / "09" / "DELETE-RESTORE" / "invoice.pdf"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(b"%PDF-1.4\nsynthetic\n")
+        self.assertTrue(repositories.insert_invoice_file(invoice_id, "invoice.pdf", original, "pdf", "a" * 64, original.stat().st_size))
+        file_id = int(repositories.list_invoice_files(invoice_id)[0]["id"])
+        repositories.create_pdf_mark(file_id, invoice_id, allocation_id, 1, 0.2, 0.3, 20, 30, 100, 100, "circle", "D301")
+
+        deleted, failed = repositories.delete_invoices([invoice_id])
+
+        self.assertEqual((deleted, failed), (1, []))
+        self.assertIsNone(repositories.find_invoice_by_external_id("DELETE-RESTORE"))
+        self.assertFalse(original.exists())
+        history = repositories.list_deleted_invoices()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["file_count"], 1)
+        self.assertFalse(history[0]["restored_at"])
+
+        restored, missing = repositories.restore_deleted_invoices([int(history[0]["id"])])
+
+        self.assertEqual((restored, missing), (1, []))
+        revived = repositories.find_invoice_by_external_id("DELETE-RESTORE")
+        self.assertIsNotNone(revived)
+        revived_id = int(revived["id"])
+        self.assertTrue(original.is_file())
+        self.assertEqual(len(repositories.list_invoice_allocations(revived_id)), 1)
+        self.assertEqual(len(repositories.list_pdf_marks(revived_id)), 1)
+        self.assertTrue(repositories.list_deleted_invoices()[0]["restored_at"])
+
+    def test_deleted_invoice_cannot_be_restored_twice(self) -> None:
+        batch_id = repositories.create_import_batch(
+            "2026-09", Path("source.csv"), Path("source.zip"), "csv-hash", "zip-hash", ""
+        )
+        invoice_id = repositories.insert_invoice(make_row("DELETE-ONCE"), "2026-09", batch_id)
+        repositories.delete_invoices([invoice_id])
+        history_id = int(repositories.list_deleted_invoices()[0]["id"])
+        repositories.restore_deleted_invoices([history_id])
+
+        with self.assertRaisesRegex(ValueError, "復元済み"):
+            repositories.restore_deleted_invoices([history_id])
+
     def test_import_history_keeps_completion_snapshot(self) -> None:
         batch_id = repositories.create_import_batch(
             "2026-09",

@@ -326,6 +326,9 @@ class InvoiceListWindow(tk.Toplevel):
         self.delete_button = ttk.Button(frame, text="選択した請求を削除",
                                         command=self.delete_selected_invoices, state=tk.DISABLED)
         self.delete_button.pack(fill=tk.X, side=tk.BOTTOM, pady=(12, 0))
+        self.deleted_history_button = ttk.Button(frame, text="削除履歴・請求書を復元",
+                                                  command=self.open_deleted_invoice_history)
+        self.deleted_history_button.pack(fill=tk.X, side=tk.BOTTOM, pady=(3, 0))
 
         trial = ttk.LabelFrame(self.action_tabs, text="試験用", padding=10)
         self.trial_frame = trial
@@ -788,7 +791,8 @@ class InvoiceListWindow(tk.Toplevel):
             return
         confirmed = messagebox.askyesno(
             "請求削除",
-            f"選択した{len(invoice_ids)}件の請求データを削除します。\n添付PDFと振分データも削除されます。続けますか？",
+            f"選択した{len(invoice_ids)}件の請求データを削除します。\n"
+            "添付PDFと振分データは削除履歴へ保全され、後から選んで復元できます。続けますか？",
         )
         if not confirmed:
             return
@@ -806,4 +810,14 @@ class InvoiceListWindow(tk.Toplevel):
                 f"{deleted_count}件を削除しました。\n一部のPDFは手動確認が必要です。\n{failed_paths[0]}",
             )
             return
-        messagebox.showinfo("請求削除", f"{deleted_count}件の請求データを削除しました。")
+        messagebox.showinfo("請求削除", f"{deleted_count}件の請求データを削除履歴へ移しました。")
+
+    def open_deleted_invoice_history(self) -> None:
+        from invoice_manager.ui.deleted_invoice_history_window import DeletedInvoiceHistoryWindow
+
+        existing = getattr(self, "deleted_invoice_history_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        self.deleted_invoice_history_window = DeletedInvoiceHistoryWindow(self, on_restored=self.reload_filter_options)

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import shutil
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
+from invoice_manager import db
 from invoice_manager.db import atomic_transaction, get_connection
 from invoice_manager.models import ImportErrorItem, InvoiceCsvRow
 from invoice_manager.services.db_backup import create_database_backup
@@ -776,24 +780,304 @@ def delete_invoices(invoice_ids: list[int]) -> tuple[int, list[str]]:
     placeholders = ",".join("?" for _ in ids)
     with get_connection() as conn:
         _require_invoice_ids_visible(conn, ids)
+        snapshots = [_deleted_invoice_snapshot(conn, invoice_id) for invoice_id in ids]
+
+    storage = _stage_deleted_invoice_files(snapshots)
     create_database_backup("before_invoice_delete")
+    try:
+        with get_connection() as conn:
+            for snapshot in snapshots:
+                conn.execute(
+                    """
+                    INSERT INTO deleted_invoices
+                        (original_invoice_id, external_id, project_code, project_name, vendor_name,
+                         invoice_date, billing_month, total_amount, total_amount_excluded, file_count,
+                         storage_key, snapshot_json, deleted_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot["invoice"]["id"], snapshot["invoice"]["external_id"],
+                        snapshot["project"]["code"], snapshot["project"]["name"], snapshot["vendor"]["name"],
+                        snapshot["invoice"]["invoice_date"], snapshot["invoice"]["billing_month"],
+                        snapshot["invoice"]["total_amount"], snapshot["invoice"]["total_amount_excluded"],
+                        len(snapshot["files"]), snapshot["storage_key"],
+                        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), now_text(),
+                    ),
+                )
+            conn.execute(f"DELETE FROM pdf_marks WHERE invoice_id IN ({placeholders})", ids)
+            conn.execute(f"DELETE FROM invoice_allocations WHERE invoice_id IN ({placeholders})", ids)
+            conn.execute(f"DELETE FROM invoice_files WHERE invoice_id IN ({placeholders})", ids)
+            cur = conn.execute(f"DELETE FROM invoices WHERE id IN ({placeholders})", ids)
+    except Exception:
+        _remove_staged_deleted_files(storage)
+        raise
+
+    deleted_paths = [_delete_invoice_file(Path(file["original_path"])) for snapshot in snapshots for file in snapshot["files"]]
+    failed_paths = [str(path) for path in deleted_paths if path is not None]
+    add_audit_log("請求削除（復元履歴へ保全）", "invoices", None, f"{len(ids)}件")
+    return int(cur.rowcount), failed_paths
+
+
+def list_deleted_invoices() -> list:
     with get_connection() as conn:
-        file_rows = conn.execute(
-            f"""
-            SELECT stored_file_path
-            FROM invoice_files
-            WHERE invoice_id IN ({placeholders})
-            """,
+        return list(conn.execute(
+            """
+            SELECT id, external_id, project_code, project_name, vendor_name, invoice_date,
+                   billing_month, total_amount, total_amount_excluded, file_count, deleted_at,
+                   restored_at, restored_invoice_id
+            FROM deleted_invoices
+            ORDER BY deleted_at DESC, id DESC
+            """
+        ).fetchall())
+
+
+def restore_deleted_invoices(history_ids: list[int]) -> tuple[int, list[str]]:
+    ids = list(dict.fromkeys(int(history_id) for history_id in history_ids))
+    if not ids:
+        return 0, []
+    placeholders = ",".join("?" for _ in ids)
+    with get_connection() as conn:
+        history_rows = conn.execute(
+            f"SELECT * FROM deleted_invoices WHERE id IN ({placeholders}) AND restored_at IS NULL ORDER BY id",
             ids,
         ).fetchall()
-        conn.execute(f"DELETE FROM pdf_marks WHERE invoice_id IN ({placeholders})", ids)
-        conn.execute(f"DELETE FROM invoice_allocations WHERE invoice_id IN ({placeholders})", ids)
-        conn.execute(f"DELETE FROM invoice_files WHERE invoice_id IN ({placeholders})", ids)
-        cur = conn.execute(f"DELETE FROM invoices WHERE id IN ({placeholders})", ids)
-    deleted_paths = [_delete_invoice_file(Path(row["stored_file_path"])) for row in file_rows]
-    failed_paths = [str(path) for path in deleted_paths if path is not None]
-    add_audit_log("請求削除", "invoices", None, f"{len(ids)}件")
-    return int(cur.rowcount), failed_paths
+    if len(history_rows) != len(ids):
+        raise ValueError("復元済み、または見つからない削除履歴が含まれています。履歴を更新して選び直してください。")
+
+    snapshots = []
+    for row in history_rows:
+        snapshot = json.loads(row["snapshot_json"])
+        _validate_deleted_snapshot(snapshot)
+        snapshots.append((row, snapshot))
+
+    missing_files = _restore_deleted_invoice_files(snapshots)
+    try:
+        with get_connection() as conn:
+            for history, snapshot in snapshots:
+                duplicate = conn.execute("SELECT id FROM invoices WHERE external_id = ?", (snapshot["invoice"]["external_id"],)).fetchone()
+                if duplicate:
+                    raise ValueError(f"請求ID {snapshot['invoice']['external_id']} は既に登録されています。")
+                invoice_id = _restore_deleted_invoice_record(conn, snapshot)
+                conn.execute(
+                    "UPDATE deleted_invoices SET restored_at = ?, restored_invoice_id = ? WHERE id = ?",
+                    (now_text(), invoice_id, int(history["id"])),
+                )
+    except Exception:
+        raise
+    add_audit_log("削除請求を復元", "deleted_invoices", None, f"{len(ids)}件")
+    return len(ids), missing_files
+
+
+def _deleted_invoice_snapshot(conn, invoice_id: int) -> dict:
+    invoice = conn.execute(
+        """
+        SELECT invoices.*, projects.project_code, projects.project_name, vendors.vendor_name,
+               vendor_contacts.last_name, vendor_contacts.first_name, vendor_contacts.email, vendor_contacts.phone
+        FROM invoices
+        JOIN projects ON projects.id = invoices.project_id
+        JOIN vendors ON vendors.id = invoices.vendor_id
+        LEFT JOIN vendor_contacts ON vendor_contacts.id = invoices.contact_id
+        WHERE invoices.id = ?
+        """, (invoice_id,),
+    ).fetchone()
+    if invoice is None:
+        raise ValueError("対象の請求が見つかりません。")
+    allocations = conn.execute(
+        """
+        SELECT invoice_allocations.*, work_type_codes.code, work_type_codes.name
+        FROM invoice_allocations
+        JOIN work_type_codes ON work_type_codes.id = invoice_allocations.work_type_code_id
+        WHERE invoice_allocations.invoice_id = ? ORDER BY invoice_allocations.sort_order, invoice_allocations.id
+        """, (invoice_id,),
+    ).fetchall()
+    files = conn.execute("SELECT * FROM invoice_files WHERE invoice_id = ? ORDER BY id", (invoice_id,)).fetchall()
+    allocation_index = {int(row["id"]): index for index, row in enumerate(allocations)}
+    snapshot_files = []
+    for file_row in files:
+        original = _validated_original_path(file_row["stored_file_path"])
+        marks = conn.execute(
+            "SELECT * FROM pdf_marks WHERE invoice_file_id = ? ORDER BY id", (file_row["id"],)
+        ).fetchall()
+        snapshot_files.append({
+            "original_path": str(original),
+            "relative_path": str(original.relative_to((db.DATA_DIR / "originals").resolve())),
+            "original_file_name": file_row["original_file_name"], "file_type": file_row["file_type"],
+            "file_hash": file_row["file_hash"], "file_size": file_row["file_size"],
+            "marks": [{**dict(mark), "allocation_index": allocation_index.get(mark["allocation_id"])} for mark in marks],
+        })
+    return {
+        "schema": 1, "storage_key": uuid4().hex,
+        "invoice": {key: invoice[key] for key in ("id", "import_batch_id", "external_id", "invoice_date", "billing_month", "billing_month_manual_override", "total_amount", "total_amount_excluded", "local_memo", "created_at", "updated_at")},
+        "project": {"code": invoice["project_code"], "name": invoice["project_name"]},
+        "vendor": {"name": invoice["vendor_name"]},
+        "contact": {key: invoice[key] for key in ("last_name", "first_name", "email", "phone")},
+        "allocations": [{**dict(row), "code": row["code"], "name": row["name"]} for row in allocations],
+        "files": snapshot_files,
+    }
+
+
+def _validated_original_path(value: str | Path) -> Path:
+    path = Path(value).resolve()
+    originals = (db.DATA_DIR / "originals").resolve()
+    if path.suffix.lower() != ".pdf" or not path.is_relative_to(originals):
+        raise ValueError("原本PDF保存フォルダ外のファイルは削除履歴へ保全できません。")
+    return path
+
+
+def _deleted_files_root(storage_key: str) -> Path:
+    return (db.DATA_DIR / "deleted_invoices" / storage_key).resolve()
+
+
+def _stage_deleted_invoice_files(snapshots: list[dict]) -> list[Path]:
+    copied: list[Path] = []
+    try:
+        for snapshot in snapshots:
+            root = _deleted_files_root(snapshot["storage_key"])
+            for file in snapshot["files"]:
+                source = Path(file["original_path"])
+                destination = (root / file["relative_path"]).resolve()
+                if not destination.is_relative_to(root):
+                    raise ValueError("削除履歴のPDF保存先が不正です。")
+                if not source.exists():
+                    raise ValueError(f"添付PDFが見つかりません: {source.name}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                copied.append(destination)
+    except Exception:
+        _remove_staged_deleted_files(copied)
+        raise
+    return copied
+
+
+def _remove_staged_deleted_files(paths: list[Path]) -> None:
+    for path in reversed(paths):
+        path.unlink(missing_ok=True)
+        current = path.parent
+        deleted_root = (db.DATA_DIR / "deleted_invoices").resolve()
+        while current != deleted_root and current.is_relative_to(deleted_root):
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
+
+
+def _validate_deleted_snapshot(snapshot: dict) -> None:
+    if snapshot.get("schema") != 1 or not isinstance(snapshot.get("invoice"), dict):
+        raise ValueError("削除履歴の形式が対応していません。")
+    required = ("external_id", "invoice_date", "billing_month", "total_amount")
+    if any(not str(snapshot["invoice"].get(key, "")).strip() for key in required):
+        raise ValueError("削除履歴の請求情報が不足しています。")
+    if not isinstance(snapshot.get("files"), list) or not isinstance(snapshot.get("allocations"), list):
+        raise ValueError("削除履歴の内容が不正です。")
+
+
+def _restore_deleted_invoice_files(snapshots: list[tuple]) -> list[str]:
+    missing: list[str] = []
+    originals = (db.DATA_DIR / "originals").resolve()
+    for _history, snapshot in snapshots:
+        trash_root = _deleted_files_root(snapshot["storage_key"])
+        for file in snapshot["files"]:
+            relative = Path(file["relative_path"])
+            source = (trash_root / relative).resolve()
+            target = (originals / relative).resolve()
+            if not source.is_relative_to(trash_root) or not target.is_relative_to(originals):
+                raise ValueError("削除履歴のPDFパスが不正です。")
+            if not source.is_file():
+                missing.append(file["original_file_name"])
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and target.read_bytes() != source.read_bytes():
+                target = target.with_name(f"{target.stem}_recovered_{snapshot['storage_key'][:8]}{target.suffix}")
+                file["restored_path"] = str(target)
+            if not target.exists():
+                shutil.copy2(source, target)
+            file["restored_path"] = str(target)
+    return missing
+
+
+def _restore_deleted_invoice_record(conn, snapshot: dict) -> int:
+    project = conn.execute("SELECT id FROM projects WHERE project_code = ?", (snapshot["project"]["code"],)).fetchone()
+    if project is None:
+        timestamp = now_text()
+        project_id = int(conn.execute(
+            "INSERT INTO projects (project_code, project_name, is_visible, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+            (snapshot["project"]["code"], snapshot["project"]["name"], timestamp, timestamp),
+        ).lastrowid)
+    else:
+        project_id = int(project["id"])
+    vendor = conn.execute("SELECT id FROM vendors WHERE vendor_name = ?", (snapshot["vendor"]["name"],)).fetchone()
+    if vendor is None:
+        timestamp = now_text()
+        vendor_id = int(conn.execute(
+            "INSERT INTO vendors (vendor_name, created_at, updated_at) VALUES (?, ?, ?)",
+            (snapshot["vendor"]["name"], timestamp, timestamp),
+        ).lastrowid)
+    else:
+        vendor_id = int(vendor["id"])
+    contact = snapshot["contact"]
+    contact_id = None
+    if any(str(contact.get(key) or "").strip() for key in ("last_name", "first_name", "email", "phone")):
+        existing = conn.execute(
+            """SELECT id FROM vendor_contacts WHERE vendor_id = ? AND COALESCE(last_name,'') = ? AND COALESCE(first_name,'') = ?
+               AND COALESCE(email,'') = ? AND COALESCE(phone,'') = ?""",
+            (vendor_id, contact.get("last_name") or "", contact.get("first_name") or "", contact.get("email") or "", contact.get("phone") or ""),
+        ).fetchone()
+        if existing:
+            contact_id = int(existing["id"])
+        else:
+            timestamp = now_text()
+            contact_id = int(conn.execute(
+                "INSERT INTO vendor_contacts (vendor_id,last_name,first_name,email,phone,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (vendor_id, contact.get("last_name"), contact.get("first_name"), contact.get("email"), contact.get("phone"), timestamp, timestamp),
+            ).lastrowid)
+    invoice = snapshot["invoice"]
+    timestamp = now_text()
+    invoice_id = int(conn.execute(
+        """INSERT INTO invoices (import_batch_id,external_id,project_id,vendor_id,contact_id,invoice_date,billing_month,
+           billing_month_manual_override,total_amount,total_amount_excluded,local_memo,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (invoice.get("import_batch_id"), invoice["external_id"], project_id, vendor_id, contact_id,
+         invoice["invoice_date"], invoice["billing_month"], int(invoice.get("billing_month_manual_override") or 0),
+         int(invoice["total_amount"]), invoice.get("total_amount_excluded"), invoice.get("local_memo"), timestamp, timestamp),
+    ).lastrowid)
+    allocation_ids: dict[int, int] = {}
+    for index, allocation in enumerate(snapshot["allocations"]):
+        code_row = conn.execute("SELECT id FROM work_type_codes WHERE project_id = ? AND code = ?", (project_id, allocation["code"])).fetchone()
+        if code_row is None:
+            code_id = int(conn.execute(
+                "INSERT INTO work_type_codes (project_id,code,name,sort_order,is_active,created_at,updated_at) VALUES (?,?,?,?,1,?,?)",
+                (project_id, allocation["code"], allocation["name"], int(allocation.get("sort_order") or 0), timestamp, timestamp),
+            ).lastrowid)
+        else:
+            code_id = int(code_row["id"])
+        allocation_ids[index] = int(conn.execute(
+            """INSERT INTO invoice_allocations (invoice_id,work_type_code_id,amount,amount_excluded,tax_rate,
+               tax_rounding_adjustment,memo,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (invoice_id, code_id, int(allocation["amount"]), allocation.get("amount_excluded"),
+             allocation.get("tax_rate") or "10", int(allocation.get("tax_rounding_adjustment") or 0),
+             allocation.get("memo"), int(allocation.get("sort_order") or 0), timestamp, timestamp),
+        ).lastrowid)
+    for file in snapshot["files"]:
+        stored_path = file.get("restored_path")
+        if not stored_path:
+            continue
+        file_id = int(conn.execute(
+            """INSERT INTO invoice_files (invoice_id,original_file_name,stored_file_path,file_type,file_hash,file_size,created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (invoice_id, file["original_file_name"], stored_path, file.get("file_type"), file["file_hash"], file.get("file_size"), timestamp),
+        ).lastrowid)
+        for mark in file["marks"]:
+            allocation_id = allocation_ids.get(mark.get("allocation_index"))
+            conn.execute(
+                """INSERT INTO pdf_marks (invoice_file_id,invoice_id,allocation_id,page_number,x_ratio,y_ratio,x_pt,y_pt,
+                   page_width_pt,page_height_pt,mark_type,label,memo,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (file_id, invoice_id, allocation_id, int(mark["page_number"]), mark["x_ratio"], mark["y_ratio"],
+                 mark.get("x_pt"), mark.get("y_pt"), mark.get("page_width_pt"), mark.get("page_height_pt"),
+                 mark["mark_type"], mark["label"], mark.get("memo"), timestamp, timestamp),
+            )
+    return invoice_id
 
 
 def recalculate_invoice_billing_months(project_id: int) -> int:
@@ -845,7 +1129,7 @@ def _delete_invoice_file(path: Path) -> Path | None:
 
 def _remove_empty_parent_dirs(path: Path) -> None:
     current = path
-    originals_dir = (Path(__file__).resolve().parent.parent / "data" / "originals").resolve()
+    originals_dir = (db.DATA_DIR / "originals").resolve()
     while current.exists() and current != originals_dir:
         try:
             current.rmdir()
