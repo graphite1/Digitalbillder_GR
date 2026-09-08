@@ -20,7 +20,6 @@ from invoice_manager.services.project_budget import (
     BudgetRowInput,
     ExtractedBudgetCandidate,
     SourcePreview,
-    build_project_forecast,
     get_project_budget,
     prepare_budget_rows_from_candidates,
     preview_source_document_isolated,
@@ -28,6 +27,7 @@ from invoice_manager.services.project_budget import (
     save_project_budget,
     suggest_budget_work_type_mappings,
 )
+from invoice_manager.services.budget_consumption import build_budget_consumption
 from invoice_manager.ui.background_activity import ActivityPanel, BackgroundActivity
 from invoice_manager.services.operation_cancellation import (
     CancellationToken, OperationCancelled, cancellation_scope, check_cancelled,
@@ -56,7 +56,7 @@ class ProjectBudgetWindow(tk.Toplevel):
 
     def __init__(self, master, project_id: int | None = None) -> None:
         super().__init__(master)
-        self.title("工事予算・最終原価見込（税抜）")
+        self.title("工事予算・消化状況（税抜）")
         self.geometry("1180x820")
         self.minsize(980, 680)
         self.project_options: dict[str, int] = {}
@@ -218,20 +218,20 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.row_tree.configure(yscrollcommand=row_scroll.set, xscrollcommand=row_xscroll.set)
         self.row_tree.bind("<Double-1>", lambda _event: self._edit_current_row())
 
-        forecast = ttk.LabelFrame(self, text="予算構成と最終原価見込（税抜）", padding=6)
+        forecast = ttk.LabelFrame(self, text="予算消化状況（手動振分・税抜）", padding=6)
         forecast.grid(row=5, column=0, sticky=tk.EW, padx=8, pady=(0, 6))
         forecast.columnconfigure(0, weight=1)
         forecast_table = ttk.Frame(forecast)
         forecast_table.grid(row=0, column=0, sticky=tk.NSEW)
         self.forecast_tree = ttk.Treeview(
             forecast_table,
-            columns=("code", "budget", "actual", "remaining", "projected", "variance"),
+            columns=("code", "budget", "actual", "remaining", "rate", "unconfirmed"),
             show="headings", height=4,
         )
         for column, label, width in (
-            ("code", "予算コード / Web対応", 220), ("budget", "実行予算", 115),
-            ("actual", "保管済Web実績", 120), ("remaining", "残工事見込", 120),
-            ("projected", "最終見込", 120), ("variance", "予算差", 120),
+            ("code", "原本コード / 公式コード", 220), ("budget", "実行予算", 115),
+            ("actual", "確認済み実績", 120), ("remaining", "残予算", 120),
+            ("rate", "消化率", 85), ("unconfirmed", "未確認", 75),
         ):
             self.forecast_tree.heading(column, text=label)
             self.forecast_tree.column(column, width=width, anchor=tk.E if column != "code" else tk.W)
@@ -251,7 +251,7 @@ class ProjectBudgetWindow(tk.Toplevel):
         self.note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         self.save_button = ttk.Button(bottom, text="予算を保存", command=self._save)
         self.save_button.pack(side=tk.RIGHT, padx=3)
-        ttk.Button(bottom, text="見込を再表示", command=self._refresh_forecast).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(bottom, text="消化状況を再表示", command=self._refresh_forecast).pack(side=tk.RIGHT, padx=3)
 
     def _project_id(self) -> int | None:
         return self.project_options.get(self.project_var.get())
@@ -757,62 +757,38 @@ class ProjectBudgetWindow(tk.Toplevel):
         if project_id is None:
             return
         try:
-            forecast = build_project_forecast(project_id)
+            summary = build_budget_consumption(project_id)
         except Exception as exc:
             self.chart.create_text(10, 15, anchor=tk.NW, text=f"実績読込エラー: {exc}", fill="#a00000")
             return
-        for row in forecast:
-            code_label = f"Web未対応: {row.work_type_code}" if row.is_unmapped_actual else row.work_type_code
-            if row.actual_work_type_code:
-                code_label += f" → {row.actual_work_type_code}"
+        for row in summary.rows:
             self.forecast_tree.insert("", tk.END, values=(
-                code_label, _amount_text(row.budget_net), _amount_text(row.actual_net),
-                _amount_text(row.remaining_net), _amount_text(row.projected_final_net),
-                _amount_text(row.variance_net),
+                row.work_type_code, _amount_text(row.budget_net), _amount_text(row.actual_net),
+                _amount_text(row.remaining_net),
+                "-" if row.utilization_rate is None else f"{row.utilization_rate * 100:.1f}%",
+                row.unconfirmed_invoice_count,
             ))
-        self._draw_chart(forecast)
+        self._draw_chart(summary)
 
-    def _draw_chart(self, forecast) -> None:
+    def _draw_chart(self, summary) -> None:
         width = max(self.chart.winfo_width(), 365) - 20
-        included = [row for row in forecast if row.include_in_total]
-        total_budget = sum(row.budget_net for row in included)
-        self.chart.create_text(10, 10, anchor=tk.NW, text="予算構成（集計対象のみ）")
+        rows = list(summary.rows)
+        total_budget = sum(row.budget_net for row in rows)
+        actual = sum(row.actual_net for row in rows)
+        self.chart.create_text(10, 10, anchor=tk.NW, text="予算: 枠線 / 確認済み実績: 塗りつぶし")
         if total_budget:
             x = 10.0
-            colors = ("#4e79a7", "#59a14f", "#f28e2b", "#b07aa1", "#76b7b2", "#e15759")
-            for index, row in enumerate(included):
+            for row in rows:
                 segment = width * row.budget_net / total_budget
-                self.chart.create_rectangle(x, 32, x + segment, 54, fill=colors[index % len(colors)], outline="white")
+                self.chart.create_rectangle(x, 32, x + segment, 58, outline="#222222")
+                used = segment if row.budget_net <= 0 else segment * min(1, row.actual_net / row.budget_net)
+                self.chart.create_rectangle(x, 32, x + used, 58, fill="#4e79a7", outline="")
                 x += segment
-            self.chart.create_text(10, 58, anchor=tk.NW, text=f"実行予算合計 {_amount_text(total_budget)} 円")
+            self.chart.create_text(10, 64, anchor=tk.NW, text=f"予算 {_amount_text(total_budget)} 円 / 確認済み実績 {_amount_text(actual)} 円 / 残額 {_amount_text(total_budget - actual)} 円")
         else:
             self.chart.create_text(10, 34, anchor=tk.NW, text="集計対象行がありません。", fill="#777777")
-        self.chart.create_text(10, 82, anchor=tk.NW, text="最終原価見込 = 保管済Web実績 + 残工事見込")
-        unmapped = [row for row in forecast if row.is_unmapped_actual]
-        if unmapped:
-            unmapped_total = sum(int(row.actual_net or 0) for row in unmapped)
-            self.chart.create_text(
-                10, 104, anchor=tk.NW,
-                text=f"Web未対応実績 {len(unmapped)}件 / {_amount_text(unmapped_total)}円があるため全体見込は未確定です。",
-                fill="#a00000", width=345,
-            )
-            return
-        if not included or any(row.remaining_net is None or row.actual_net is None for row in included):
-            self.chart.create_text(
-                10, 104, anchor=tk.NW,
-                text="実績未同期・Web対応未設定・残工事未入力の行があるため算出できません。",
-                fill="#9a4d00", width=345,
-            )
-            return
-        actual = sum(int(row.actual_net or 0) for row in included)
-        remaining = sum(int(row.remaining_net or 0) for row in included)
-        projected = actual + remaining
-        scale = max(total_budget, projected, 1)
-        actual_width = width * actual / scale
-        remaining_width = width * remaining / scale
-        self.chart.create_rectangle(10, 104, 10 + actual_width, 122, fill="#4e79a7", outline="")
-        self.chart.create_rectangle(10 + actual_width, 104, 10 + actual_width + remaining_width, 122, fill="#f28e2b", outline="")
-        self.chart.create_rectangle(10, 104, 10 + width * total_budget / scale, 122, outline="#222222", width=2)
+        if summary.unconfirmed_invoices:
+            self.chart.create_text(10, 96, anchor=tk.NW, text=f"未確認 {len(summary.unconfirmed_invoices)}件は予算消化額に含めていません。", fill="#9a4d00")
 
     def _open_source(self) -> None:
         path = self.source_path or self.stored_source_path
