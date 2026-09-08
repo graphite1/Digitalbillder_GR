@@ -225,11 +225,11 @@ class ProjectBudgetWindow(tk.Toplevel):
         forecast_table.grid(row=0, column=0, sticky=tk.NSEW)
         self.forecast_tree = ttk.Treeview(
             forecast_table,
-            columns=("code", "budget", "actual", "remaining", "rate", "unconfirmed"),
+            columns=("code", "name", "budget", "actual", "remaining", "rate", "unconfirmed"),
             show="headings", height=4,
         )
         for column, label, width in (
-            ("code", "原本コード / 公式コード", 220), ("budget", "実行予算", 115),
+            ("code", "正式工種コード", 125), ("name", "科目", 150), ("budget", "実行予算", 115),
             ("actual", "確認済み実績", 120), ("remaining", "残予算", 120),
             ("rate", "消化率", 85), ("unconfirmed", "未確認", 75),
         ):
@@ -763,7 +763,8 @@ class ProjectBudgetWindow(tk.Toplevel):
             return
         for row in summary.rows:
             self.forecast_tree.insert("", tk.END, values=(
-                row.work_type_code, _amount_text(row.budget_net), _amount_text(row.actual_net),
+                row.official_work_type_code or "未登録", row.work_type_name,
+                _amount_text(row.budget_net), _amount_text(row.actual_net),
                 _amount_text(row.remaining_net),
                 "-" if row.utilization_rate is None else f"{row.utilization_rate * 100:.1f}%",
                 row.unconfirmed_invoice_count,

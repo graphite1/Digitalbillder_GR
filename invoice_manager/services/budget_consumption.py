@@ -12,6 +12,7 @@ from invoice_manager.services.work_type_resolution import normalize_budget_work_
 @dataclass(frozen=True, slots=True)
 class BudgetConsumptionRow:
     work_type_code: str
+    official_work_type_code: str | None
     work_type_name: str
     budget_net: int
     actual_net: int
@@ -114,7 +115,7 @@ def build_budget_consumption(
                 totals[budget_row.work_type_code] += int(row["amount_excluded"])
     rows = tuple(
         BudgetConsumptionRow(
-            row.work_type_code, row.work_type_name, row.budget_net,
+            row.work_type_code, row.actual_work_type_code, row.work_type_name, row.budget_net,
             totals[row.work_type_code], row.budget_net - totals[row.work_type_code],
             None if row.budget_net == 0 else totals[row.work_type_code] / row.budget_net,
             unconfirmed_counts[row.work_type_code],

@@ -67,12 +67,11 @@ class BudgetConsumptionTests(unittest.TestCase):
         summary = build_budget_consumption(self.project_id)
         september = build_budget_consumption(self.project_id, billing_month='2026-09')
 
-        self.assertEqual([(row.work_type_code, row.actual_net, row.remaining_net) for row in summary.rows],
-                         [('301', 300, 700), ('513', 0, 0)])
+        self.assertEqual([(row.work_type_code, row.official_work_type_code, row.actual_net, row.remaining_net) for row in summary.rows],
+                         [('301', 'D301', 300, 700), ('513', 'D513', 0, 0)])
         self.assertEqual([(row.external_id, row.reason) for row in summary.unconfirmed_invoices], [
             ('partial', '振分税抜合計が請求書税抜額と一致しません'),
             ('missing', '工種振分が未入力です'),
         ])
         self.assertEqual(len(september.unconfirmed_invoices), 1)
         self.assertEqual(september.rows[0].unconfirmed_invoice_count, 1)
-
