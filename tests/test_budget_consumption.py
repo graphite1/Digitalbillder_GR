@@ -6,6 +6,11 @@ from pathlib import Path
 
 from invoice_manager import db
 from invoice_manager.services.budget_consumption import build_budget_consumption
+from invoice_manager.services.historical_costs import (
+    ArchivedAllocationSnapshot,
+    ArchivedInvoiceSnapshot,
+    replace_active_archived_snapshots,
+)
 from invoice_manager.services.project_budget import BudgetRowInput, save_project_budget
 
 
@@ -75,3 +80,26 @@ class BudgetConsumptionTests(unittest.TestCase):
         ])
         self.assertEqual(len(september.unconfirmed_invoices), 1)
         self.assertEqual(september.rows[0].unconfirmed_invoice_count, 1)
+
+    def test_archived_actuals_are_counted_and_take_priority_over_same_local_invoice_id(self) -> None:
+        duplicate = self.invoice('same-id', 300)
+        self.allocation(duplicate, self.code_301, 300)
+        local = self.invoice('local-only', 200)
+        self.allocation(local, self.code_301, 200)
+        replace_active_archived_snapshots([
+            ArchivedInvoiceSnapshot(
+                'same-id', 'P-BUDGET', '試験工事', '試験会社', '2026-09-10', 550,
+                'archived', (ArchivedAllocationSnapshot('D301', '仮設工', 500, '10', 50, 550),),
+            ),
+            ArchivedInvoiceSnapshot(
+                'archive-only', 'P-BUDGET', '試験工事', '試験会社', '2026-09-09', 110,
+                'archived', (ArchivedAllocationSnapshot('D301', '仮設工', 100, '10', 10, 110),),
+            ),
+        ], project_code='P-BUDGET')
+
+        september = build_budget_consumption(self.project_id, billing_month='2026-09')
+        october = build_budget_consumption(self.project_id, billing_month='2026-10')
+
+        self.assertEqual(september.rows[0].actual_net, 300)  # local-only 200 + archive-only 100
+        self.assertEqual(october.rows[0].actual_net, 500)  # archived same-id; local 300 is excluded
+        self.assertEqual(october.unconfirmed_invoices, ())
