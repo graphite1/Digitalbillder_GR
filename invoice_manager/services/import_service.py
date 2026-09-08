@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 from zipfile import ZipFile
 
+from invoice_manager import db
 from invoice_manager.models import ImportResult, PreviewResult
 from invoice_manager.repositories import (
     add_audit_log,
@@ -100,6 +102,7 @@ def execute_import(
     billing_month: str,
     memo: str = "",
     prepared_preview: PreviewResult | None = None,
+    before_finalize: Callable[[], None] | None = None,
 ) -> ImportResult:
     if prepared_preview is not None and prepared_preview.source_signature == _source_signature(csv_path, zip_path):
         preview = prepared_preview
@@ -118,46 +121,60 @@ def execute_import(
     inserted_count = 0
     file_count = 0
     try:
-        save_import_errors(import_batch_id, preview.errors)
-        add_audit_log("CSV取込", "import_batches", import_batch_id, f"{csv_path.name}: {preview.csv_count}件")
-        add_audit_log("zip取込", "import_batches", import_batch_id, f"{zip_path.name}: PDF {preview.pdf_file_count}件")
-        for external_id in sorted(preview.duplicate_summary.existing_skip_ids):
-            add_audit_log("重複スキップ", "import_batches", import_batch_id, external_id)
-        for external_id in sorted(preview.duplicate_summary.update_candidate_ids):
-            add_audit_log("更新候補検出", "import_batches", import_batch_id, external_id)
+        # Every import entrypoint must have the same all-or-nothing database boundary.
+        # The selected Digital Billder flow used to provide this boundary itself, while
+        # the manual CSV/ZIP flow could leave a partial invoice behind after an I/O error.
+        with db.atomic_transaction():
+            save_import_errors(import_batch_id, preview.errors)
+            add_audit_log("CSV取込", "import_batches", import_batch_id, f"{csv_path.name}: {preview.csv_count}件")
+            add_audit_log("zip取込", "import_batches", import_batch_id, f"{zip_path.name}: PDF {preview.pdf_file_count}件")
+            for external_id in sorted(preview.duplicate_summary.existing_skip_ids):
+                add_audit_log("重複スキップ", "import_batches", import_batch_id, external_id)
+            for external_id in sorted(preview.duplicate_summary.update_candidate_ids):
+                add_audit_log("更新候補検出", "import_batches", import_batch_id, external_id)
 
-        hidden_project_codes = list_hidden_project_codes()
-        importable_ids = {
-            row.external_id
-            for row in preview.csv_rows
-            if row.external_id in preview.duplicate_summary.new_ids
-            and row.project_code not in hidden_project_codes
-        }
-        with ZipFile(zip_path) as zip_file:
-            for row in preview.csv_rows:
-                if row.external_id not in importable_ids:
-                    continue
-                row_billing_month = billing_month_from_invoice_date(row.invoice_date)
-                invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
-                inserted_count += 1
-                for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
-                    stored_path, file_hash, file_size = store_pdf_from_zip(
-                        zip_path,
-                        item,
-                        row_billing_month,
-                        zip_file=zip_file,
-                    )
-                    inserted = insert_invoice_file(
-                        invoice_id=invoice_id,
-                        original_file_name=item.original_file_name,
-                        stored_file_path=stored_path,
-                        file_type=item.file_type,
-                        file_hash=file_hash,
-                        file_size=file_size,
-                    )
-                    if inserted:
+            hidden_project_codes = list_hidden_project_codes()
+            importable_ids = {
+                row.external_id
+                for row in preview.csv_rows
+                if row.external_id in preview.duplicate_summary.new_ids
+                and row.project_code not in hidden_project_codes
+            }
+            with ZipFile(zip_path) as zip_file:
+                for row in preview.csv_rows:
+                    if row.external_id not in importable_ids:
+                        continue
+                    row_billing_month = billing_month_from_invoice_date(row.invoice_date)
+                    invoice_id = insert_invoice(row, row_billing_month, import_batch_id)
+                    inserted_count += 1
+                    for item in preview.zip_index.pdf_by_id.get(row.external_id, []):
+                        stored_path, file_hash, file_size = store_pdf_from_zip(
+                            zip_path,
+                            item,
+                            row_billing_month,
+                            zip_file=zip_file,
+                        )
+                        inserted = insert_invoice_file(
+                            invoice_id=invoice_id,
+                            original_file_name=item.original_file_name,
+                            stored_file_path=stored_path,
+                            file_type=item.file_type,
+                            file_hash=file_hash,
+                            file_size=file_size,
+                        )
+                        if not inserted:
+                            raise RuntimeError("PDF添付を台帳に登録できません。取込は完了扱いにしません。")
                         file_count += 1
                         add_audit_log("PDF保存", "invoices", invoice_id, str(stored_path))
+            if before_finalize is not None:
+                before_finalize()
+            finalize_import_batch(
+                import_batch_id,
+                inserted_count,
+                file_count,
+                len(preview.errors),
+                "completed",
+            )
     except Exception as exc:
         try:
             finalize_import_batch(
@@ -171,14 +188,6 @@ def execute_import(
         except Exception:
             pass
         raise
-
-    finalize_import_batch(
-        import_batch_id,
-        inserted_count,
-        file_count,
-        len(preview.errors),
-        "completed",
-    )
 
     return ImportResult(
         preview=preview,

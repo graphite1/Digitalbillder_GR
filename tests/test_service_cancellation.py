@@ -119,13 +119,13 @@ class ServiceCancellationTests(unittest.TestCase):
         def execute(*_args, **_kwargs):
             self.assertFalse(self.token.request())
             check_cancelled()
+            _kwargs["before_finalize"]()
             return result
 
         connection = MagicMock()
         with (cancellation_scope(self.token), self.import_patches(),
               patch.object(sync, "download_selected_zip", return_value=self.root / "mock.zip"),
               patch.object(sync, "preview_import", return_value=preview), patch.object(sync, "execute_import", side_effect=execute),
-              patch.object(db, "atomic_transaction", return_value=nullcontext()),
               patch.object(db, "get_connection", return_value=nullcontext(connection))):
             self.assertIs(sync.import_selected({"synthetic"}), result)
         connection.executemany.assert_called_once()

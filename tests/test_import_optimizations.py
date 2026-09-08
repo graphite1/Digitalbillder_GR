@@ -7,7 +7,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 from invoice_manager.models import DuplicateSummary, InvoiceCsvRow, PreviewResult, ZipIndex, ZipPdfItem
-from invoice_manager.services import import_service
+from invoice_manager.services import file_storage, import_service
 
 
 def empty_preview(source_signature) -> PreviewResult:
@@ -217,6 +217,66 @@ class ImportOptimizationTests(unittest.TestCase):
                 )
 
         finalize.assert_called_once_with(7, 0, 0, 0, "failed", "登録失敗")
+
+    def test_execute_import_rejects_unregistered_pdf_attachment(self) -> None:
+        row = InvoiceCsvRow(
+            row_number=2, external_id="NEW", project_name="工事A", project_code="P001",
+            vendor_name="取引先A", last_name="", first_name="", email="", phone="",
+            invoice_date="2026-08-20", total_amount=110_000, raw_data={},
+        )
+        item = ZipPdfItem("NEW", "NEW/a.pdf", "a.pdf", "invoice", 1)
+        preview = empty_preview(import_service._source_signature(self.csv_path, self.zip_path))
+        preview.csv_rows = [row]
+        preview.zip_index = ZipIndex(id_folders={"NEW"}, pdf_by_id={"NEW": [item]})
+        preview.duplicate_summary = DuplicateSummary(new_ids={"NEW"})
+        with (
+            patch.object(import_service, "create_import_batch", return_value=8),
+            patch.object(import_service, "save_import_errors"),
+            patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
+            patch.object(import_service, "insert_invoice", return_value=10),
+            patch.object(import_service, "store_pdf_from_zip", return_value=(self.root / "a.pdf", "hash-a", 1)),
+            patch.object(import_service, "insert_invoice_file", return_value=False),
+            patch.object(import_service, "finalize_import_batch") as finalize,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PDF添付を台帳に登録できません"):
+                import_service.execute_import(self.csv_path, self.zip_path, "", prepared_preview=preview)
+
+        finalize.assert_called_once_with(8, 1, 0, 0, "failed", "PDF添付を台帳に登録できません。取込は完了扱いにしません。")
+
+    def test_pdf_storage_cleans_temporary_file_when_replace_fails(self) -> None:
+        item = ZipPdfItem("NEW", "NEW/a.pdf", "a.pdf", "invoice", 5)
+        with ZipFile(self.zip_path, "w") as archive:
+            archive.writestr(item.zip_name, b"%PDF-")
+
+        with (
+            patch.object(file_storage, "DATA_DIR", self.root),
+            patch.object(file_storage.os, "replace", side_effect=OSError("disk failure")),
+        ):
+            with self.assertRaisesRegex(OSError, "disk failure"):
+                file_storage.store_pdf_from_zip(self.zip_path, item, "")
+
+        self.assertEqual(list((self.root / "originals").rglob("*.part")), [])
+        self.assertEqual(list((self.root / "originals").rglob("a.pdf")), [])
+
+    def test_execute_import_fails_when_final_confirmation_fails(self) -> None:
+        preview = empty_preview(import_service._source_signature(self.csv_path, self.zip_path))
+        with (
+            patch.object(import_service, "create_import_batch", return_value=9),
+            patch.object(import_service, "save_import_errors"),
+            patch.object(import_service, "add_audit_log"),
+            patch.object(import_service, "create_database_backup"),
+            patch.object(import_service, "list_hidden_project_codes", return_value=set()),
+            patch.object(import_service, "finalize_import_batch") as finalize,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "候補状態を更新できません"):
+                import_service.execute_import(
+                    self.csv_path, self.zip_path, "", prepared_preview=preview,
+                    before_finalize=lambda: (_ for _ in ()).throw(RuntimeError("候補状態を更新できません")),
+                )
+
+        finalize.assert_called_once_with(9, 0, 0, 0, "failed", "候補状態を更新できません")
 
 
 if __name__ == "__main__":

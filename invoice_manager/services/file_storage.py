@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -36,7 +38,20 @@ def store_pdf_from_zip(
     file_hash = sha256_bytes(data)
     target_path = _unique_path(target_dir / file_name, file_hash)
     if not target_path.exists():
-        target_path.write_bytes(data)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=f".{target_path.name}.", suffix=".part", dir=target_dir, delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(data)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, target_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
     return target_path.resolve(), file_hash, len(data)
 
 

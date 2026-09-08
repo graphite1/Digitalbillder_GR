@@ -169,10 +169,14 @@ def import_selected(ids: set[str], progress=lambda text: None):
                 raise ValueError("選択した請求に重複候補・アーカイブ工事があります。手動取込で内容を確認してください。")
             progress("選択した請求を台帳に登録しています…")
             begin_commit()
-            with db.atomic_transaction():
-                result = execute_import(selected_csv, zip_path, "", "Digital Billder新着取込", prepared_preview=preview)
+            def mark_imported() -> None:
                 with db.get_connection() as conn:
                     conn.executemany("UPDATE digital_billder_seen SET state='imported' WHERE external_id=?", [(i,) for i in ids])
+
+            result = execute_import(
+                selected_csv, zip_path, "", "Digital Billder新着取込",
+                prepared_preview=preview, before_finalize=mark_imported,
+            )
             return result
     finally:
         SYNC_LOCK.release()
