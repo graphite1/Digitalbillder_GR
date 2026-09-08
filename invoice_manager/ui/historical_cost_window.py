@@ -11,7 +11,6 @@ from tkinter import ttk
 from invoice_manager.repositories import get_app_setting, list_projects, set_app_setting
 from invoice_manager.services.historical_costs import (
     ACTUAL_SOURCE,
-    PLANNED_SOURCE,
     has_historical_costs,
     get_historical_sync_status,
     list_costs,
@@ -28,8 +27,6 @@ from invoice_manager.services.operation_cancellation import (
 
 ALL_LABEL = "すべて"
 ARCHIVE_REFRESH_PROJECT_SETTING = "historical_archive_refresh_project_code"
-SOURCE_ACTUAL_LABEL = "Web保管済み実績"
-SOURCE_WITH_PLANNED_LABEL = "Web実績＋ローカル振分（予定）"
 
 
 class HistoricalCostWindow(tk.Toplevel):
@@ -38,7 +35,7 @@ class HistoricalCostWindow(tk.Toplevel):
     def __init__(self, master, on_refresh_history: Callable[..., object] | None = None,
                  on_full_refresh_history: Callable[..., object] | None = None) -> None:
         super().__init__(master)
-        self.title("保管済み請求書の実績・履歴候補")
+        self.title("実績履歴の取込・工種候補")
         self.geometry("1120x680")
         self.minsize(880, 520)
         self.on_refresh_history = on_refresh_history
@@ -48,7 +45,6 @@ class HistoricalCostWindow(tk.Toplevel):
         self.refresh_project_var = tk.StringVar(value=ALL_LABEL)
         self.vendor_var = tk.StringVar(value=ALL_LABEL)
         self.work_type_var = tk.StringVar(value=ALL_LABEL)
-        self.source_var = tk.StringVar(value=SOURCE_ACTUAL_LABEL)
         self.suggestion_vendor_var = tk.StringVar()
         self.suggestion_project_var = tk.StringVar(value=ALL_LABEL)
         self.project_codes: dict[str, str | None] = {ALL_LABEL: None}
@@ -61,7 +57,7 @@ class HistoricalCostWindow(tk.Toplevel):
         self.busy = False
         self.closing = False
         self.poll_id: str | None = None
-        self.activity = BackgroundActivity(self, "保管済み実績の取得")
+        self.activity = BackgroundActivity(self, "実績履歴の取得")
 
         self._build()
         self.reload()
@@ -90,7 +86,7 @@ class HistoricalCostWindow(tk.Toplevel):
         )
         self.refresh_project_combo.pack(anchor=tk.W, pady=(2, 0))
         self.refresh_project_combo.bind("<<ComboboxSelected>>", self._remember_refresh_project)
-        ttk.Label(self, text="実績＝保管済みの査定金額。履歴候補＝会社別によく使う工種。請求書を重複登録する機能ではありません。", wraplength=1000).pack(anchor=tk.W, padx=10)
+        ttk.Label(self, text="実績履歴は、アプリ利用前の請求を手打ちせず取り込むためのものです。履歴候補は会社別によく使う工種を確認する参考情報です。", wraplength=1000).pack(anchor=tk.W, padx=10)
         ttk.Label(self, text="通常は確認済み明細を再利用します。過去の査定だけをWebで修正したときは「全件を再検証」を使ってください。", wraplength=1000).pack(anchor=tk.W, padx=10, pady=(2, 4))
         self.history_status = ttk.Label(self, text="", wraplength=1000)
         self.history_status.pack(anchor=tk.W, padx=10, pady=(0, 6))
@@ -109,9 +105,7 @@ class HistoricalCostWindow(tk.Toplevel):
         self.project_combo = self._filter_combo(filters, "工事", self.project_var, 30)
         self.vendor_combo = self._filter_combo(filters, "取引先", self.vendor_var, 26)
         self.work_type_combo = self._filter_combo(filters, "工種", self.work_type_var, 28)
-        self.source_combo = self._filter_combo(filters, "表示対象", self.source_var, 31)
-        self.source_combo.configure(values=(SOURCE_ACTUAL_LABEL, SOURCE_WITH_PLANNED_LABEL))
-        for combo in (self.project_combo, self.vendor_combo, self.work_type_combo, self.source_combo):
+        for combo in (self.project_combo, self.vendor_combo, self.work_type_combo):
             combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh_costs())
 
         columns = (
@@ -232,9 +226,9 @@ class HistoricalCostWindow(tk.Toplevel):
                 refreshed = status.last_successful_refresh
             status_text = f"最終取得: {refreshed}（現在有効 {status.active_invoice_count}件）"
         elif has_historical_costs():
-            status_text = "保管済み履歴を取得済み（最終取得日時なし）"
+            status_text = "実績履歴を取得済み（最終取得日時なし）"
         else:
-            status_text = "保管済み履歴はまだ取得されていません"
+            status_text = "実績履歴はまだ取得されていません"
         self.history_status.configure(text=status_text)
         self.refresh_costs()
         self.refresh_suggestions()
@@ -267,14 +261,13 @@ class HistoricalCostWindow(tk.Toplevel):
 
     def refresh_costs(self) -> None:
         self.cost_tree.delete(*self.cost_tree.get_children())
-        include_planned = self.source_var.get() == SOURCE_WITH_PLANNED_LABEL
         rows = list_costs(
             project_code=self.project_codes.get(self.project_var.get()),
             vendor_name=None if self.vendor_var.get() == ALL_LABEL else self.vendor_var.get(),
             work_type_code=self.work_type_codes.get(self.work_type_var.get()),
-            include_planned=include_planned,
+            include_planned=False,
         )
-        source_labels = {ACTUAL_SOURCE: "Web保管済み実績", PLANNED_SOURCE: "ローカル振分（予定）"}
+        source_labels = {ACTUAL_SOURCE: "認可済み実績"}
         for row in rows:
             self.cost_tree.insert(
                 "",
@@ -295,7 +288,7 @@ class HistoricalCostWindow(tk.Toplevel):
         elif has_historical_costs():
             self.cost_empty_label.configure(text="選択した条件に該当する履歴はありません。")
         else:
-            self.cost_empty_label.configure(text="保管済み履歴が未取得のため、実績金額は未確認です。")
+            self.cost_empty_label.configure(text="実績履歴が未取得のため、過去分の実績金額は未確認です。")
 
     def refresh_suggestions(self) -> None:
         self.suggestion_tree.delete(*self.suggestion_tree.get_children())

@@ -83,7 +83,7 @@ class MainWindow:
             (
                 "集計・予算",
                 (
-                    ("保管済み履歴・工事別実績", self.open_historical_costs),
+                    ("実績履歴の取込・工種候補", self.open_historical_costs),
                     ("月別工種実績集計", self.open_monthly_work_type_summary),
                     ("工事予算・着地見込", self.open_project_budget),
                     ("Excel出力", self.export_excel),
