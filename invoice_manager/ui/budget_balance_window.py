@@ -37,10 +37,18 @@ class BudgetBalanceWindow(tk.Toplevel):
         ):
             self.tree.heading(key, text=label)
             self.tree.column(key, width=width, anchor=tk.E if key not in {"code", "name"} else tk.W)
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(bars_frame, background="white", highlightthickness=1)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.tree.column("#0", width=0, stretch=False)
+        table_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=table_scroll.set)
+        table_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bar_scroll = ttk.Scrollbar(bars_frame, orient=tk.VERTICAL)
+        self.canvas = tk.Canvas(bars_frame, background="white", highlightthickness=1, yscrollcommand=bar_scroll.set)
+        bar_scroll.configure(command=self.canvas.yview)
+        bar_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda _event: self._draw())
+        self.canvas.bind("<MouseWheel>", self._scroll_bars)
         self.summary = None
         self.reload()
 
@@ -70,7 +78,7 @@ class BudgetBalanceWindow(tk.Toplevel):
             return
         self.canvas.create_text(16, 14, anchor=tk.NW, text="枠線: 予算　青: 確認済み実績　白: 残予算")
         y = 44
-        bar_left, bar_width = 210, width - 250
+        bar_left, bar_width = 210, max(300, width - 390)
         for row in rows:
             self.canvas.create_text(16, y + 11, anchor=tk.W, text=f"{row.official_work_type_code or '未登録'}  {row.work_type_name}")
             self.canvas.create_rectangle(bar_left, y, bar_left + bar_width, y + 22, outline="#222222")
@@ -78,3 +86,7 @@ class BudgetBalanceWindow(tk.Toplevel):
             self.canvas.create_rectangle(bar_left, y, bar_left + used, y + 22, fill="#4e79a7", outline="")
             self.canvas.create_text(bar_left + bar_width + 8, y + 11, anchor=tk.W, text=f"残 {row.remaining_net:,} 円")
             y += 42
+        self.canvas.configure(scrollregion=(0, 0, width, y + 12))
+
+    def _scroll_bars(self, event) -> None:
+        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
