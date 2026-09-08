@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import datetime
 from tkinter import ttk
 
+from invoice_manager.repositories import get_app_setting, list_projects, set_app_setting
 from invoice_manager.services.historical_costs import (
     ACTUAL_SOURCE,
     PLANNED_SOURCE,
@@ -26,6 +27,7 @@ from invoice_manager.services.operation_cancellation import (
 
 
 ALL_LABEL = "すべて"
+ARCHIVE_REFRESH_PROJECT_SETTING = "historical_archive_refresh_project_code"
 SOURCE_ACTUAL_LABEL = "Web保管済み実績"
 SOURCE_WITH_PLANNED_LABEL = "Web実績＋ローカル振分（予定）"
 
@@ -43,12 +45,14 @@ class HistoricalCostWindow(tk.Toplevel):
         self.on_full_refresh_history = on_full_refresh_history
 
         self.project_var = tk.StringVar(value=ALL_LABEL)
+        self.refresh_project_var = tk.StringVar(value=ALL_LABEL)
         self.vendor_var = tk.StringVar(value=ALL_LABEL)
         self.work_type_var = tk.StringVar(value=ALL_LABEL)
         self.source_var = tk.StringVar(value=SOURCE_ACTUAL_LABEL)
         self.suggestion_vendor_var = tk.StringVar()
         self.suggestion_project_var = tk.StringVar(value=ALL_LABEL)
         self.project_codes: dict[str, str | None] = {ALL_LABEL: None}
+        self.refresh_project_codes: dict[str, str | None] = {ALL_LABEL: None}
         self.work_type_codes: dict[str, str | None] = {ALL_LABEL: None}
         self.suggestion_project_codes: dict[str, str | None] = {ALL_LABEL: None}
         self.refresh_button: ttk.Button | None = None
@@ -78,6 +82,14 @@ class HistoricalCostWindow(tk.Toplevel):
         if self.on_full_refresh_history is not None:
             self.full_refresh_button = ttk.Button(toolbar, text="全件を再検証（時間がかかります）", command=lambda: self._run_refresh(full=True))
             self.full_refresh_button.pack(side=tk.LEFT, padx=8)
+        target_group = ttk.Frame(toolbar)
+        target_group.pack(side=tk.RIGHT)
+        ttk.Label(target_group, text="取得対象工事").pack(anchor=tk.W)
+        self.refresh_project_combo = ttk.Combobox(
+            target_group, textvariable=self.refresh_project_var, state="readonly", width=34,
+        )
+        self.refresh_project_combo.pack(anchor=tk.W, pady=(2, 0))
+        self.refresh_project_combo.bind("<<ComboboxSelected>>", self._remember_refresh_project)
         ttk.Label(self, text="実績＝保管済みの査定金額。履歴候補＝会社別によく使う工種。請求書を重複登録する機能ではありません。", wraplength=1000).pack(anchor=tk.W, padx=10)
         ttk.Label(self, text="通常は確認済み明細を再利用します。過去の査定だけをWebで修正したときは「全件を再検証」を使ってください。", wraplength=1000).pack(anchor=tk.W, padx=10, pady=(2, 4))
         self.history_status = ttk.Label(self, text="", wraplength=1000)
@@ -187,10 +199,17 @@ class HistoricalCostWindow(tk.Toplevel):
         project_labels = [f"{code} {name}" for code, name in options.projects]
         self.project_codes = {ALL_LABEL: None, **dict(zip(project_labels, (code for code, _ in options.projects)))}
         self.suggestion_project_codes = dict(self.project_codes)
+        refresh_options = list_projects(active_only=True)
+        refresh_labels = [f"{row['project_code']} {row['project_name']}" for row in refresh_options]
+        self.refresh_project_codes = {
+            ALL_LABEL: None,
+            **dict(zip(refresh_labels, (str(row["project_code"]) for row in refresh_options))),
+        }
         work_type_labels = [f"{code} {name}" for code, name in options.work_types]
         self.work_type_codes = {ALL_LABEL: None, **dict(zip(work_type_labels, (code for code, _ in options.work_types)))}
 
         self._set_combo_values(self.project_combo, self.project_var, list(self.project_codes), ALL_LABEL)
+        self._restore_refresh_project()
         self._set_combo_values(self.vendor_combo, self.vendor_var, [ALL_LABEL, *options.vendors], ALL_LABEL)
         self._set_combo_values(self.work_type_combo, self.work_type_var, list(self.work_type_codes), ALL_LABEL)
         self._set_combo_values(
@@ -225,6 +244,26 @@ class HistoricalCostWindow(tk.Toplevel):
         combo.configure(values=values)
         if variable.get() not in values:
             variable.set(fallback)
+
+    def _restore_refresh_project(self) -> None:
+        current_code = self.refresh_project_codes.get(self.refresh_project_var.get())
+        saved_code = get_app_setting(ARCHIVE_REFRESH_PROJECT_SETTING).strip()
+        selected_code = current_code or saved_code
+        labels = [
+            label for label, code in self.refresh_project_codes.items()
+            if code == selected_code
+        ]
+        if labels:
+            self.refresh_project_var.set(labels[0])
+        else:
+            self.refresh_project_var.set(ALL_LABEL)
+            if saved_code:
+                set_app_setting(ARCHIVE_REFRESH_PROJECT_SETTING, "")
+        self.refresh_project_combo.configure(values=list(self.refresh_project_codes))
+
+    def _remember_refresh_project(self, _event=None) -> None:
+        code = self.refresh_project_codes.get(self.refresh_project_var.get())
+        set_app_setting(ARCHIVE_REFRESH_PROJECT_SETTING, code or "")
 
     def refresh_costs(self) -> None:
         self.cost_tree.delete(*self.cost_tree.get_children())
@@ -297,7 +336,13 @@ class HistoricalCostWindow(tk.Toplevel):
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.DISABLED)
         token = self.cancellation = CancellationToken()
-        self.activity.start("保管済み履歴を全件再検証中…" if full else "保管済み履歴の追加・変更分を確認中…", cancellation=token)
+        target_code = self.refresh_project_codes.get(self.refresh_project_var.get())
+        target_name = self.refresh_project_var.get()
+        self.activity.start(
+            (f"{target_name}: 保管済み履歴を全件再検証中…" if full
+             else f"{target_name}: 保管済み履歴の追加・変更分を確認中…"),
+            cancellation=token,
+        )
         events = self.events
 
         def progress(message: str) -> None:
@@ -309,11 +354,14 @@ class HistoricalCostWindow(tk.Toplevel):
                 if callback is None:
                     return
                 try:
-                    accepts_progress = bool(inspect.signature(callback).parameters)
+                    parameters = inspect.signature(callback).parameters
                 except (TypeError, ValueError):
-                    accepts_progress = False
+                    parameters = {}
+                accepts_progress = bool(parameters)
+                accepts_project_code = "project_code" in parameters
                 with cancellation_scope(token):
-                    result = callback(progress) if accepts_progress else callback()
+                    kwargs = {"project_code": target_code} if accepts_project_code else {}
+                    result = callback(progress, **kwargs) if accepts_progress else callback(**kwargs)
             except OperationCancelled as exc:
                 events.put(("cancelled", str(exc)))
             except Exception as exc:

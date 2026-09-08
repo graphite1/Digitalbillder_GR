@@ -136,6 +136,26 @@ class BackgroundReadWindowsTests(unittest.TestCase):
         window.close()
         self.assert_no_dialogs()
 
+    def test_history_refresh_passes_selected_project_to_supported_callback(self):
+        received = []
+
+        def refresh(progress, *, project_code=None):
+            received.append(project_code)
+            progress("Project refresh")
+            return "Project history saved"
+
+        with patch("invoice_manager.ui.historical_cost_window.list_projects", return_value=[
+            {"project_code": "P001", "project_name": "第一工事"},
+        ]):
+            window = HistoricalCostWindow(self.root, on_refresh_history=refresh)
+            window.refresh_project_var.set("P001 第一工事")
+            window._remember_refresh_project()
+            window._run_refresh()
+            self.pump_until(lambda: not window.busy)
+            self.assertEqual(received, ["P001"])
+            window.close()
+        self.assert_no_dialogs()
+
     def test_web_failure_finishes_activity_and_enables_retry(self):
         self.start_patch("invoice_manager.ui.web_allocation_preview_window.read_for_plan",
                          side_effect=RuntimeError("Test web failure"))
