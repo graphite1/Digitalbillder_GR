@@ -45,18 +45,18 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
         self.project_combo.bind("<<ComboboxSelected>>", lambda _event: self.reload_months())
         self.month_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
-        columns = ("code", "name", "invoice_count", "line_count", "net", "gross")
+        columns = ("code", "name", "invoice_count", "line_count", "net")
         frame = ttk.Frame(self, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
         self.tree = ttk.Treeview(frame, columns=columns, show="headings")
         headings = {
             "code": "工種コード", "name": "工種名", "invoice_count": "請求書数",
-            "line_count": "振分行数", "net": "振分金額(税抜)", "gross": "振分金額(税込)",
+            "line_count": "振分行数", "net": "振分金額(税抜)",
         }
-        widths = {"code": 110, "name": 220, "invoice_count": 85, "line_count": 85, "net": 140, "gross": 140}
+        widths = {"code": 130, "name": 280, "invoice_count": 100, "line_count": 100, "net": 180}
         for column in columns:
             self.tree.heading(column, text=headings[column])
-            self.tree.column(column, width=widths[column], anchor=tk.E if column in {"invoice_count", "line_count", "net", "gross"} else tk.W)
+            self.tree.column(column, width=widths[column], anchor=tk.E if column in {"invoice_count", "line_count", "net"} else tk.W)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.grid(row=0, column=0, sticky=tk.NSEW)
@@ -90,15 +90,14 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
             self.summary_var.set("実績に対象工事または請求月がありません。")
             return
         rows = list_monthly_actual_work_type_summary(project_id, billing_month)
-        net_total = gross_total = 0
+        net_total = 0
         for row in rows:
             net_total += row.net_amount
-            gross_total += row.gross_amount
             self.tree.insert("", tk.END, values=(
                 row.work_type_code, row.work_type_name, row.invoice_count, row.allocation_line_count,
-                f"{format_amount(row.net_amount)}円", f"{format_amount(row.gross_amount)}円",
+                f"{format_amount(row.net_amount)}円",
             ))
         self.summary_var.set(
-            f"{billing_month}: {len(rows)}工種　振分合計（税抜）{format_amount(net_total)}円　（税込）{format_amount(gross_total)}円"
+            f"{billing_month}: {len(rows)}工種　振分合計（税抜）{format_amount(net_total)}円"
             if rows else f"{billing_month}: 実績の振分データはありません。"
         )
