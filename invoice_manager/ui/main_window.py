@@ -93,8 +93,6 @@ class MainWindow:
                 "設定",
                 (
                     ("工事表示設定", self.open_project_visibility),
-                    ("工種コードマスタ", self.open_work_type_master),
-                    ("取引先別工種候補", self.open_vendor_work_type_candidates),
                     ("アプリの更新", self.open_update),
                 ),
             ),
