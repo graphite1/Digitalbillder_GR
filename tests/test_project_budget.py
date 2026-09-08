@@ -26,6 +26,7 @@ from invoice_manager.services.project_budget import (
     save_project_budget,
     suggest_budget_work_type_mappings,
     _source_digest,
+    _candidates_from_table,
 )
 from invoice_manager.services.work_type_resolution import CanonicalWorkType
 from invoice_manager.services.operation_cancellation import (
@@ -174,6 +175,22 @@ class ProjectBudgetTests(unittest.TestCase):
         self.assertEqual(candidate.work_type_name, "")
         self.assertFalse(rows[0].include_in_total)
         self.assertIsNone(get_project_budget(self.project_id))
+
+    def test_pdf_blank_budget_cell_becomes_zero_budget_candidate(self) -> None:
+        candidates, inferred = _candidates_from_table(
+            [
+                ["工種コード", "科目", "実行予算", "予定金額"],
+                ["513", "舗装工", "", ""],
+            ],
+            page_number=2,
+            table_number=1,
+        )
+
+        self.assertFalse(inferred)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].work_type_code, "513")
+        self.assertEqual(candidates[0].budget_net, 0)
+        self.assertIsNone(candidates[0].scheduled_net)
 
     def test_actual_prefix_wins_over_local_d_rule_in_budget_proposal(self) -> None:
         repositories.save_work_type_code(self.project_id, "513", "基本科目")

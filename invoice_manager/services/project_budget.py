@@ -892,6 +892,10 @@ def _parse_money(value: object) -> int | None:
     return int(text.replace(",", ""))
 
 
+def _is_blank_cell(value: object) -> bool:
+    return value is None or not str(value).strip()
+
+
 def _looks_like_code(value: object) -> bool:
     text = "" if value is None else str(value).strip()
     if not text or len(text) > 32 or any(character.isspace() for character in text):
@@ -956,6 +960,11 @@ def _candidates_from_table(
             if not _looks_like_code(code):
                 continue
             budget_value = _parse_money(padded[budget_column])
+            if budget_value is None and _is_blank_cell(padded[budget_column]):
+                # A printed work type with no budget amount is a deliberate zero
+                # budget row.  Keep it visible for review instead of treating it
+                # as an unallocated invoice or silently discarding the work type.
+                budget_value = 0
             scheduled_value = _parse_money(padded[scheduled_column])
             # A blank-amount row is still useful for a printed code such as 513.
             # Restrict that case to compact identifier characters so adjacent free
