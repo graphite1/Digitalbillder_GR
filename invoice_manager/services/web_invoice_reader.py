@@ -201,7 +201,9 @@ def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]
     return results
 
 
-def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool = False) -> str:
+def sync_archived_history(
+    progress=lambda _message: None, *, full_refresh: bool = False, project_code: str | None = None,
+) -> str:
     from invoice_manager.services.historical_costs import (
         ArchivedAllocationSnapshot, ArchivedInvoiceSnapshot, load_active_archived_snapshots,
         replace_active_archived_snapshots,
@@ -215,7 +217,10 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
         snapshots = []
         empty_ids = []
         stage = "保存済み履歴の読込み"
-        cached = {} if full_refresh else load_active_archived_snapshots()
+        scope = None if project_code is None else str(project_code).strip()
+        if scope == "":
+            raise InvoiceReadError("取得対象工事コードが空です。")
+        cached = {} if full_refresh else load_active_archived_snapshots(scope)
         reused = 0
         read_results = []
         with tempfile.TemporaryDirectory(prefix="digitalbillder_history_") as folder:
@@ -226,8 +231,9 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                 rows, errors, _encoding = read_invoice_csv(path) if path else ([], [], None)
                 if errors or len({row.external_id for row in rows}) != len(rows):
                     raise InvoiceReadError("保管済み一覧の重複または読取りエラーがあります。")
+                target_rows = [row for row in rows if scope is None or row.project_code == scope]
                 pending = []
-                for row in rows:
+                for row in target_rows:
                     check_cancelled()
                     prior = cached.get(row.external_id)
                     if _cached_snapshot_matches(prior, row):
@@ -235,7 +241,8 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                         reused += 1
                     else:
                         pending.append(row)
-                progress(f"保管済み{len(rows)}件: 確認済み{reused}件 / 詳細取得{len(pending)}件")
+                target_label = scope or "全工事"
+                progress(f"{target_label}: 保管済み{len(target_rows)}件: 確認済み{reused}件 / 詳細取得{len(pending)}件")
                 if len(pending) == 1:
                     stage = "保管済み請求の詳細読込み"
                     read_results.append(read_invoice_page(page, pending[0].external_id))
@@ -269,8 +276,12 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
         # One complete scan replaces availability atomically; failed scans publish nothing.
         stage = "保管済み履歴の保存"
         begin_commit()
-        replace_active_archived_snapshots(snapshots)
-        return f"保管済み{len(rows)}件を確認。詳細取得{len(pending)}件 / 確認済み再利用{reused}件 / 今回取得分の査定なし{len(empty_ids)}件。\n保存済み査定だけが修正された場合は「全件を再検証」で反映してください。"
+        if scope is None:
+            replace_active_archived_snapshots(snapshots)
+        else:
+            replace_active_archived_snapshots(snapshots, project_code=scope)
+        target_label = scope or "全工事"
+        return f"{target_label}: 保管済み{len(target_rows)}件を確認。詳細取得{len(pending)}件 / 確認済み再利用{reused}件 / 今回取得分の査定なし{len(empty_ids)}件。\n保存済み査定だけが修正された場合は「全件を再検証」で反映してください。"
     except InvoiceReadError:
         check_cancelled()
         raise

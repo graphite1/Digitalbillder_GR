@@ -164,6 +164,19 @@ class HistoricalCostsTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual([tuple(row) for row in rows], [("first", 0), ("second", 1)])
 
+    def test_project_scoped_scan_keeps_other_project_history_active(self) -> None:
+        first = snapshot("first", allocation("01", 100), project_code="P001")
+        other = snapshot("other", allocation("02", 200), project_code="P002", project_name="第二工事")
+        history.replace_active_archived_snapshots([first, other])
+
+        result = history.replace_active_archived_snapshots([], project_code="P001")
+
+        self.assertEqual(result.deactivated_invoice_count, 1)
+        self.assertEqual(set(history.load_active_archived_snapshots()), {"other"})
+        self.assertEqual(set(history.load_active_archived_snapshots("P002")), {"other"})
+        with self.assertRaisesRegex(ValueError, "対象外"):
+            history.replace_active_archived_snapshots([other], project_code="P001")
+
     def test_active_cache_restores_complete_verified_snapshots_in_line_order(self) -> None:
         expected = snapshot(
             "cached",

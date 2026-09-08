@@ -330,8 +330,10 @@ def upsert_archived_invoices(snapshots: Iterable[ArchivedInvoiceSnapshot]) -> li
 
 def replace_active_archived_snapshots(
     snapshots: Iterable[ArchivedInvoiceSnapshot],
+    *,
+    project_code: str | None = None,
 ) -> HistoricalReconcileResult:
-    """Atomically publish one complete archive scan and deactivate missing prior records.
+    """Atomically publish an archive scan and deactivate missing records in its scope.
 
     The iterable is fully materialized and verified before the transaction begins. Duplicate
     external IDs are rejected because a complete scan must have one authoritative snapshot per
@@ -344,6 +346,11 @@ def replace_active_archived_snapshots(
     external_ids = [item.external_id for item in verified]
     if len(external_ids) != len(set(external_ids)):
         raise ValueError("完全走査の結果に同じ請求書IDが重複しています。")
+    scope = None if project_code is None else str(project_code).strip()
+    if scope == "":
+        raise ValueError("取得対象工事コードが空です。")
+    if scope is not None and any(item.project_code != scope for item in verified):
+        raise ValueError("取得対象外の工事を含む履歴は保存できません。")
     timestamp = _utc_now_text()
     with db.get_connection() as connection:
         _ensure_schema(connection)
@@ -352,24 +359,37 @@ def replace_active_archived_snapshots(
             results = [_upsert_with_connection(connection, item, timestamp) for item in verified]
             if external_ids:
                 placeholders = ", ".join("?" for _ in external_ids)
+                project_clause = " AND project_code = ?" if scope is not None else ""
+                parameters = [timestamp, timestamp, *external_ids]
+                if scope is not None:
+                    parameters.append(scope)
                 cursor = connection.execute(
                     f"""
                     UPDATE historical_archived_invoices
                     SET is_active = 0, unavailable_at = ?, updated_at = ?
                     WHERE source = 'digital_billder' AND is_active = 1
                       AND external_id NOT IN ({placeholders})
+                      {project_clause}
                     """,
-                    (timestamp, timestamp, *external_ids),
+                    parameters,
                 )
             else:
+                project_clause = " AND project_code = ?" if scope is not None else ""
                 cursor = connection.execute(
-                    """
+                    f"""
                     UPDATE historical_archived_invoices
                     SET is_active = 0, unavailable_at = ?, updated_at = ?
                     WHERE source = 'digital_billder' AND is_active = 1
+                    {project_clause}
                     """,
-                    (timestamp, timestamp),
+                    (timestamp, timestamp) if scope is None else (timestamp, timestamp, scope),
                 )
+            active_count = int(connection.execute(
+                """
+                SELECT COUNT(*) FROM historical_archived_invoices
+                WHERE source = 'digital_billder' AND status = 'archived' AND is_active = 1
+                """
+            ).fetchone()[0])
             connection.execute(
                 """
                 INSERT INTO historical_archive_sync_state (id, last_successful_refresh, active_invoice_count)
@@ -378,7 +398,7 @@ def replace_active_archived_snapshots(
                     last_successful_refresh = excluded.last_successful_refresh,
                     active_invoice_count = excluded.active_invoice_count
                 """,
-                (timestamp, len(verified)),
+                (timestamp, active_count),
             )
         except Exception:
             connection.execute("ROLLBACK TO SAVEPOINT historical_archive_reconcile")
@@ -387,7 +407,7 @@ def replace_active_archived_snapshots(
         else:
             connection.execute("RELEASE SAVEPOINT historical_archive_reconcile")
     return HistoricalReconcileResult(
-        active_invoice_count=len(verified),
+        active_invoice_count=active_count,
         inserted_invoice_count=sum(1 for result in results if result.created),
         updated_invoice_count=sum(1 for result in results if not result.created),
         deactivated_invoice_count=int(cursor.rowcount),
@@ -409,13 +429,16 @@ def get_historical_sync_status() -> HistoricalSyncStatus:
     )
 
 
-def load_active_archived_snapshots() -> dict[str, ArchivedInvoiceSnapshot]:
+def load_active_archived_snapshots(project_code: str | None = None) -> dict[str, ArchivedInvoiceSnapshot]:
     """Load the active Web cache as verified snapshots keyed by external invoice ID.
 
     This is a single-query, read-only cache API for incremental archive scans.  Inactive
     records are deliberately excluded so a re-archived invoice is fetched from the Web
     again. Allocation order and the Web-provided tax components are restored unchanged.
     """
+    scope = None if project_code is None else str(project_code).strip()
+    if scope == "":
+        raise ValueError("取得対象工事コードが空です。")
     with db.get_connection() as connection:
         _ensure_schema(connection)
         rows = connection.execute(
@@ -442,8 +465,10 @@ def load_active_archived_snapshots() -> dict[str, ArchivedInvoiceSnapshot]:
             WHERE i.source = 'digital_billder'
               AND i.status = 'archived'
               AND i.is_active = 1
+              AND (? IS NULL OR i.project_code = ?)
             ORDER BY i.external_id, a.line_number, a.id
-            """
+            """,
+            (scope, scope),
         ).fetchall()
 
     grouped: dict[str, dict[str, object]] = {}
