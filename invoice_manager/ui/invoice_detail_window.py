@@ -92,6 +92,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         self.topmost_var = tk.IntVar(value=0)
         self.mark_mode_var = tk.IntVar(value=0)
         self.memo_text = ""
+        self._list_refresh_required = False
         self._build()
         self.bind("<Delete>", self.delete_selected_pdf_mark_shortcut)
         self.bind("<Control-z>", self.undo_last_pdf_mark)
@@ -102,7 +103,13 @@ class InvoiceDetailWindow(tk.Toplevel):
         if has_running_descendants(self):
             self.withdraw()
         else:
+            if self._list_refresh_required and self.on_saved:
+                self.on_saved()
             self.destroy()
+
+    def mark_list_refresh_required(self) -> None:
+        """Refresh the parent list once when this detail window closes after a list-visible edit."""
+        self._list_refresh_required = True
 
     def _build(self) -> None:
         top_area = tk.Frame(self, padx=10, pady=8)
@@ -274,6 +281,7 @@ class InvoiceDetailWindow(tk.Toplevel):
         )
         self.info_vars["contact"].set(f"{row['last_name'] or ''} {row['first_name'] or ''}".strip())
         self.memo_text = row["local_memo"] or ""
+        self._loaded_memo = self.memo_text
         self.update_invoice_navigation()
         self.load_work_type_options()
         self.load_allocations()
@@ -427,9 +435,11 @@ class InvoiceDetailWindow(tk.Toplevel):
             self.clear_pdf_preview("PDF添付なし")
 
     def save_memo(self) -> None:
-        update_invoice_memo(self.invoice_id, self.memo_text.strip())
-        if self.on_saved:
-            self.on_saved()
+        memo = self.memo_text.strip()
+        if memo == getattr(self, "_loaded_memo", None):
+            return
+        update_invoice_memo(self.invoice_id, memo)
+        getattr(self, "mark_list_refresh_required", lambda: None)()
         self.load()
 
     def on_allocation_selected(self, _event=None) -> None:
@@ -530,8 +540,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             messagebox.showerror("端数調整", str(exc), parent=self)
             return
         self.load_allocations()
-        if self.on_saved:
-            self.on_saved()
+        getattr(self, "mark_list_refresh_required", lambda: None)()
 
     def edit_allocation(self) -> None:
         selection = self.allocations.selection()
@@ -602,6 +611,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             return
         delete_invoice_allocation(self.allocation_ids[selection[0]])
         self.load_allocations()
+        getattr(self, "mark_list_refresh_required", lambda: None)()
         if self.pdf_path:
             self.render_pdf_marks()
 
@@ -712,6 +722,7 @@ class InvoiceDetailWindow(tk.Toplevel):
             dialog.destroy()
             self.load_work_type_options()
             self.load_allocations()
+            getattr(self, "mark_list_refresh_required", lambda: None)()
 
         buttons = tk.Frame(dialog)
         buttons.grid(row=8, column=0, columnspan=2, sticky=tk.W, padx=12, pady=10)

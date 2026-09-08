@@ -465,7 +465,10 @@ class InvoiceListWindow(tk.Toplevel):
             except (TypeError, ValueError):
                 continue
             formatted.append(f"{self.display_work_type_code(parts[0])}　{format_amount(amount)}円")
-        return "\n".join(formatted)
+        if len(formatted) > 4:
+            formatted[3] += f"（ほか{len(formatted) - 4}件）"
+            formatted = formatted[:4]
+        return "\n".join("　｜　".join(formatted[index:index + 2]) for index in range(0, len(formatted), 2))
 
     @staticmethod
     def display_work_type_code(code: str) -> str:

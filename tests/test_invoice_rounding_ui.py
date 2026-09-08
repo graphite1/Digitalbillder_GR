@@ -10,6 +10,7 @@ class InvoiceRoundingUiTests(unittest.TestCase):
         self.window = SimpleNamespace(
             invoice_id=1, allocations=SimpleNamespace(selection=lambda: ("row",)),
             allocation_ids={"row": 2}, load_allocations=Mock(), on_saved=Mock(),
+            mark_list_refresh_required=Mock(),
         )
         self.preview = SimpleNamespace(
             code="D570", name="その他工事", net_amount=22956, difference=1,
@@ -25,6 +26,7 @@ class InvoiceRoundingUiTests(unittest.TestCase):
         self.assertIn("2,295円 → 2,296円", confirm.call_args.args[1])
         apply.assert_called_once_with(1, 2, self.preview)
         self.window.load_allocations.assert_called_once()
+        self.window.mark_list_refresh_required.assert_called_once()
 
     def test_cancel_leaves_allocations_untouched(self):
         with patch("invoice_manager.services.allocation_rounding.preview_rounding_adjustment", return_value=self.preview), \
@@ -33,6 +35,19 @@ class InvoiceRoundingUiTests(unittest.TestCase):
             InvoiceDetailWindow.adjust_tax_rounding(self.window)
         apply.assert_not_called()
         self.window.load_allocations.assert_not_called()
+
+    def test_close_refreshes_parent_only_after_a_list_visible_change(self):
+        changed = SimpleNamespace(_list_refresh_required=True, on_saved=Mock(), destroy=Mock(), withdraw=Mock())
+        unchanged = SimpleNamespace(_list_refresh_required=False, on_saved=Mock(), destroy=Mock(), withdraw=Mock())
+
+        with patch("invoice_manager.ui.invoice_detail_window.has_running_descendants", return_value=False):
+            InvoiceDetailWindow.close_window(changed)
+            InvoiceDetailWindow.close_window(unchanged)
+
+        changed.on_saved.assert_called_once()
+        changed.destroy.assert_called_once()
+        unchanged.on_saved.assert_not_called()
+        unchanged.destroy.assert_called_once()
 
     def test_stale_snapshot_error_is_visible_without_success_reload(self):
         with patch("invoice_manager.services.allocation_rounding.preview_rounding_adjustment", return_value=self.preview), \
