@@ -3,33 +3,33 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from invoice_manager.services.historical_costs import (
-    list_archived_billing_months,
-    list_historical_cost_filter_options,
-    list_monthly_archived_work_type_summary,
+from invoice_manager.repositories import list_projects
+from invoice_manager.services.actual_ledger import (
+    list_actual_billing_months,
+    list_monthly_actual_work_type_summary,
 )
 from invoice_manager.utils.money_utils import format_amount
 
 
 class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
-    """Trial, read-only monthly work-type summary sourced from archived Web data."""
+    """Read-only monthly work-type summary sourced from common actuals."""
 
     def __init__(self, master) -> None:
         super().__init__(master)
-        self.title("月別工種振分集計（試験）")
+        self.title("月別工種実績集計")
         self.geometry("900x580")
         self.minsize(760, 460)
         self.project_var = tk.StringVar()
         self.month_var = tk.StringVar()
         self.summary_var = tk.StringVar()
-        self.project_codes: dict[str, str] = {}
+        self.project_ids: dict[str, int] = {}
         self._build()
         self.reload_projects()
 
     def _build(self) -> None:
         ttk.Label(
             self,
-            text="試験表示: 保管済み請求書の請求日から月を判定して集計します。データの保存・変更は行いません。",
+            text="実績を請求月ごとに集計します。保管済み実績を優先し、同じ請求書IDの手入力は二重計上しません。データの保存・変更は行いません。",
             wraplength=840,
         ).pack(anchor=tk.W, padx=12, pady=(12, 6))
         filters = ttk.Frame(self, padding=(12, 4))
@@ -66,28 +66,30 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
         ttk.Label(self, textvariable=self.summary_var, padding=(12, 0, 12, 12)).pack(anchor=tk.W)
 
     def reload_projects(self) -> None:
-        options = list_historical_cost_filter_options()
-        self.project_codes = {f"{code} {name}": code for code, name in options.projects}
-        labels = list(self.project_codes)
+        self.project_ids = {
+            f"{row['project_code']} {row['project_name']}": int(row["id"])
+            for row in list_projects()
+        }
+        labels = list(self.project_ids)
         self.project_combo.configure(values=labels)
         self.project_var.set(labels[0] if labels else "")
         self.reload_months()
 
     def reload_months(self) -> None:
-        project_code = self.project_codes.get(self.project_var.get())
-        months = list_archived_billing_months(project_code) if project_code else ()
+        project_id = self.project_ids.get(self.project_var.get())
+        months = list_actual_billing_months(project_id) if project_id else ()
         self.month_combo.configure(values=months)
         self.month_var.set(months[0] if months else "")
         self.refresh()
 
     def refresh(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        project_code = self.project_codes.get(self.project_var.get())
+        project_id = self.project_ids.get(self.project_var.get())
         billing_month = self.month_var.get()
-        if not project_code or not billing_month:
-            self.summary_var.set("保管済みデータに対象工事または請求月がありません。")
+        if not project_id or not billing_month:
+            self.summary_var.set("実績に対象工事または請求月がありません。")
             return
-        rows = list_monthly_archived_work_type_summary(project_code, billing_month)
+        rows = list_monthly_actual_work_type_summary(project_id, billing_month)
         net_total = gross_total = 0
         for row in rows:
             net_total += row.net_amount
@@ -98,5 +100,5 @@ class MonthlyWorkTypeSummaryWindow(tk.Toplevel):
             ))
         self.summary_var.set(
             f"{billing_month}: {len(rows)}工種　振分合計（税抜）{format_amount(net_total)}円　（税込）{format_amount(gross_total)}円"
-            if rows else f"{billing_month}: 保管済みの振分データはありません。"
+            if rows else f"{billing_month}: 実績の振分データはありません。"
         )

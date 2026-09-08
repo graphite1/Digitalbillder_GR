@@ -42,6 +42,16 @@ class ActualLedger:
     unconfirmed_local_invoices: tuple[UnconfirmedLocalInvoice, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MonthlyActualWorkTypeSummaryRow:
+    work_type_code: str
+    work_type_name: str
+    invoice_count: int
+    allocation_line_count: int
+    net_amount: int
+    gross_amount: int
+
+
 def build_project_actual_ledger(project_id: int, *, billing_month: str | None = None) -> ActualLedger:
     """Return confirmed project actuals, preferring active archived invoices by ID."""
     if isinstance(project_id, bool) or not isinstance(project_id, int):
@@ -122,3 +132,33 @@ def build_project_actual_ledger(project_id: int, *, billing_month: str | None = 
                 for row in rows
             )
     return ActualLedger(tuple(allocations), tuple(unconfirmed))
+
+
+def list_actual_billing_months(project_id: int) -> tuple[str, ...]:
+    """List billing months represented by the common actual ledger."""
+    return tuple(sorted({item.billing_month for item in build_project_actual_ledger(project_id).allocations}, reverse=True))
+
+
+def list_monthly_actual_work_type_summary(
+    project_id: int, billing_month: str,
+) -> tuple[MonthlyActualWorkTypeSummaryRow, ...]:
+    """Aggregate one project's actuals for one billing month."""
+    month = str(billing_month).strip()
+    if len(month) != 7 or month[4] != "-" or not month.replace("-", "").isdigit():
+        raise ValueError("請求月はYYYY-MM形式で指定してください。")
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for item in build_project_actual_ledger(project_id, billing_month=month).allocations:
+        values = grouped.setdefault((item.work_type_code, item.work_type_name), {
+            "invoice_ids": set(), "line_count": 0, "net": 0, "gross": 0,
+        })
+        values["invoice_ids"].add(item.external_id)
+        values["line_count"] += 1
+        values["net"] += item.net_amount
+        values["gross"] += item.gross_amount
+    return tuple(
+        MonthlyActualWorkTypeSummaryRow(
+            code, name, len(values["invoice_ids"]), int(values["line_count"]),
+            int(values["net"]), int(values["gross"]),
+        )
+        for (code, name), values in sorted(grouped.items())
+    )

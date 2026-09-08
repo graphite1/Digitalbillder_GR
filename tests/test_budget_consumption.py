@@ -5,6 +5,10 @@ import unittest
 from pathlib import Path
 
 from invoice_manager import db
+from invoice_manager.services.actual_ledger import (
+    list_actual_billing_months,
+    list_monthly_actual_work_type_summary,
+)
 from invoice_manager.services.budget_consumption import build_budget_consumption
 from invoice_manager.services.historical_costs import (
     ArchivedAllocationSnapshot,
@@ -103,3 +107,20 @@ class BudgetConsumptionTests(unittest.TestCase):
         self.assertEqual(september.rows[0].actual_net, 300)  # local-only 200 + archive-only 100
         self.assertEqual(october.rows[0].actual_net, 500)  # archived same-id; local 300 is excluded
         self.assertEqual(october.unconfirmed_invoices, ())
+
+    def test_monthly_actual_summary_uses_the_same_archive_priority(self) -> None:
+        local = self.invoice('same-id', 200)
+        self.allocation(local, self.code_301, 200)
+        replace_active_archived_snapshots([
+            ArchivedInvoiceSnapshot(
+                'same-id', 'P-BUDGET', '試験工事', '試験会社', '2026-09-10', 330,
+                'archived', (ArchivedAllocationSnapshot('D301', '仮設工', 300, '10', 30, 330),),
+            ),
+        ], project_code='P-BUDGET')
+
+        self.assertEqual(list_actual_billing_months(self.project_id), ('2026-10',))
+        rows = list_monthly_actual_work_type_summary(self.project_id, '2026-10')
+        self.assertEqual(
+            [(row.work_type_code, row.invoice_count, row.net_amount) for row in rows],
+            [('D301', 1, 300)],
+        )
