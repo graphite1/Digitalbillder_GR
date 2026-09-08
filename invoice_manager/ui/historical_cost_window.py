@@ -35,7 +35,7 @@ class HistoricalCostWindow(tk.Toplevel):
     def __init__(self, master, on_refresh_history: Callable[..., object] | None = None,
                  on_full_refresh_history: Callable[..., object] | None = None) -> None:
         super().__init__(master)
-        self.title("実績履歴の取込・工種候補")
+        self.title("過去実績を取り込む")
         self.geometry("1120x680")
         self.minsize(880, 520)
         self.on_refresh_history = on_refresh_history

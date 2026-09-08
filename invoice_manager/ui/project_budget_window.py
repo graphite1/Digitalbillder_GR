@@ -56,7 +56,7 @@ class ProjectBudgetWindow(tk.Toplevel):
 
     def __init__(self, master, project_id: int | None = None) -> None:
         super().__init__(master)
-        self.title("工事予算・消化状況（税抜）")
+        self.title("工事予算・実績（税抜）")
         self.geometry("1180x820")
         self.minsize(980, 680)
         self.project_options: dict[str, int] = {}
