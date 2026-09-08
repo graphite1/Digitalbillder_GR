@@ -76,7 +76,12 @@ def export_session(progress: Callable[[str], None], *, archived_only: bool = Fal
     from playwright.sync_api import Error, TimeoutError, expect, sync_playwright
 
     check_cancelled()
-    email, password = load_credentials()
+    try:
+        email, password = load_credentials()
+    except ValueError as exc:
+        # This message is safe to show in the UI and tells the user how to
+        # prepare a newly-created development environment.
+        raise DownloadError(str(exc)) from None
     check_cancelled()
     try:
         with sync_playwright() as playwright:

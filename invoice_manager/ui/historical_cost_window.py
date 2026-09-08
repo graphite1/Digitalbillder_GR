@@ -17,6 +17,7 @@ from invoice_manager.services.historical_costs import (
     list_historical_cost_filter_options,
     list_historical_work_type_suggestions,
 )
+from invoice_manager.services.digital_billder_download import DownloadError
 from invoice_manager.utils.money_utils import format_amount
 from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 from invoice_manager.services.operation_cancellation import (
@@ -370,7 +371,11 @@ class HistoricalCostWindow(tk.Toplevel):
         if self.full_refresh_button is not None:
             self.full_refresh_button.configure(state=tk.NORMAL)
         suffix = "保存済みの実績は「表示を更新」で確認できます。"
-        self.history_status.configure(text=f"履歴取得に失敗しました。{suffix}")
+        # DownloadError messages are deliberately sanitized at the service
+        # boundary, unlike a raw browser exception.  Showing them here makes
+        # first-time setup errors (such as missing login settings) actionable.
+        detail = str(error).strip() if isinstance(error, DownloadError) else "履歴取得に失敗しました。"
+        self.history_status.configure(text=f"{detail} {suffix}")
         self.activity.finish(f"履歴取得に失敗しました: {error}。{suffix}", failed=True)
 
     def close(self) -> None:

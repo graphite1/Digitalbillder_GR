@@ -210,14 +210,17 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
     check_cancelled()
     if not _sync_lock.acquire(blocking=False):
         raise InvoiceReadError("保管済み履歴の取得を実行中です。")
+    stage = "準備"
     try:
         snapshots = []
         empty_ids = []
+        stage = "保存済み履歴の読込み"
         cached = {} if full_refresh else load_active_archived_snapshots()
         reused = 0
         read_results = []
         with tempfile.TemporaryDirectory(prefix="digitalbillder_history_") as folder:
             with export_session(progress, archived_only=True) as page:
+                stage = "保管済み一覧のCSV読込み"
                 path = download_csv(page, Path(folder) / "archived.csv")
                 check_cancelled()
                 rows, errors, _encoding = read_invoice_csv(path) if path else ([], [], None)
@@ -234,16 +237,19 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                         pending.append(row)
                 progress(f"保管済み{len(rows)}件: 確認済み{reused}件 / 詳細取得{len(pending)}件")
                 if len(pending) == 1:
+                    stage = "保管済み請求の詳細読込み"
                     read_results.append(read_invoice_page(page, pending[0].external_id))
                 # Authentication state stays in process memory, never in files or logs.
                 session_state = page.context.storage_state() if len(pending) > 1 else None
                 check_cancelled()
             if len(pending) > 1:
+                stage = "保管済み請求の詳細読込み"
                 read_results = _read_archive_batches(pending, session_state, progress)
             by_id = {result.external_id: result for result in read_results}
             if len(read_results) != len(pending) or len(by_id) != len(pending) or set(by_id) != {row.external_id for row in pending}:
                 raise InvoiceReadError("取得した請求ID・件数が一致しません。履歴は更新していません。")
             for row in pending:
+                stage = "保管済み請求の内容確認"
                 check_cancelled()
                 result = by_id[row.external_id]
                 verify_identity(result, external_id=row.external_id, project_code=row.project_code,
@@ -261,6 +267,7 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
                         for line in result.lines),
                 ))
         # One complete scan replaces availability atomically; failed scans publish nothing.
+        stage = "保管済み履歴の保存"
         begin_commit()
         replace_active_archived_snapshots(snapshots)
         return f"保管済み{len(rows)}件を確認。詳細取得{len(pending)}件 / 確認済み再利用{reused}件 / 今回取得分の査定なし{len(empty_ids)}件。\n保存済み査定だけが修正された場合は「全件を再検証」で反映してください。"
@@ -269,6 +276,6 @@ def sync_archived_history(progress=lambda _message: None, *, full_refresh: bool 
         raise
     except (ValueError, AssertionError):
         check_cancelled()
-        raise InvoiceReadError("保管済み履歴の内容を確認できません。履歴は更新していません。") from None
+        raise InvoiceReadError(f"{stage}で内容を確認できません。履歴は更新していません。") from None
     finally:
         _sync_lock.release()
