@@ -185,15 +185,19 @@ class ResolvedAllocationTests(unittest.TestCase):
             save_resolved_allocation(99999, "301", 100)
         self.assertEqual(self.database_state(), before)
 
-    def test_budget_actual_code_resolves_shorthand_and_preserves_empty(self) -> None:
+    def test_budget_actual_code_normalizes_three_digits_and_resolves_explicit_codes(self) -> None:
         self.add_history("D301")
         self.add_history("B401", project_code="P002")
-        for value, expected in (("301", "D301"), ("３０１", "D301"), ("D301｜実績工種", "D301"), (" ", None)):
+        normalized = {
+            "301": "D301", "３０１": "D301", "D301｜実績工種": "D301", " ": None,
+            "401": "D401", "999": "D999",
+        }
+        for value, expected in normalized.items():
             with self.subTest(value=value):
                 stub = SimpleNamespace(_project_id=lambda: self.project_id, code_name_options={},
                                        actual_code_var=SimpleNamespace(get=lambda: value))
                 self.assertEqual(ProjectBudgetWindow._actual_code(stub), expected)
-        for value in ("401", "B401", "999"):
+        for value in ("B401", "D301X"):
             with self.subTest(value=value):
                 stub = SimpleNamespace(_project_id=lambda: self.project_id, code_name_options={},
                                        actual_code_var=SimpleNamespace(get=lambda: value))
