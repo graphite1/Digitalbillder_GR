@@ -7,7 +7,7 @@ Digital Billderを置き換えず、CSVとzip内PDF原本をローカルで保�
 
 ## 開発進度マップ
 
-**最新公開版v1.0.6／2026年9月6日時点。** イラストはv1.0.4時点の記録です。その後の変更は進度マップの表と最新の課題を参照してください。
+**最新公開版v2.0.3／code sequence 12／2026年9月9日公開。** イラストはv1.0.4時点の記録です。v2.0.3までの変更は進度マップの表と最新の課題を参照してください。
 
 [![Digitalbuilder GR 開発進度マップ](docs/assets/progress-map-2026-09-06.png)](docs/PROGRESS_MAP.md)
 
@@ -112,7 +112,9 @@ python app.py
 
 ## Windows向け配布と起動
 
-初めて使うPCでは、[配布サイト](https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site/)のセットアップEXEから導入します。Pythonと必要な部品を初回だけ取得・検証し、完了後はショートカットまたは `Digitalbuilder GR.exe` から起動できます。
+初めて使うPCでは、[配布サイト](https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site/)のセットアップEXEから導入します。Windows ZIPを直接使う場合は、新しいフォルダーへすべて解凍し、`起動.bat`を開いてください。既存の保存先へ上書きしません。
+
+2026年9月21日にv2.0.3のWindows ZIPとセットアップEXEの公開取得を確認しました。既存利用者はアプリ内更新も利用できます。
 
 - Pythonの事前インストールは不要です。取得した一時ZIPはセットアップ完了後に削除し、実行環境と台帳は保持します。
 - 軽量版は既存のEdgeを画面を出さずに再利用します。EdgeがないPCに限り、専用ブラウザーを初回取得します。
