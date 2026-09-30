@@ -132,7 +132,7 @@ class ServiceCancellationTests(unittest.TestCase):
         self.assertFalse(sync.SYNC_LOCK.locked())
 
     def test_archive_cancel_does_not_replace_availability_and_releases_lock(self) -> None:
-        def fetch(*_args):
+        def fetch(*_args, **_kwargs):
             self.token.request()
             return None
 
@@ -172,7 +172,7 @@ class ServiceCancellationTests(unittest.TestCase):
         events_lock = threading.Lock()
 
         @contextmanager
-        def session(_state):
+        def session(_state, *, timeout_ms):
             self.assertIs(current_token(), self.token)
             identifier = threading.get_ident()
             with events_lock:
@@ -183,7 +183,7 @@ class ServiceCancellationTests(unittest.TestCase):
                 with events_lock:
                     events.append(("close", identifier))
 
-        def read(page, _identifier):
+        def read(page, _identifier, *, timeout_ms):
             self.assertEqual(page, threading.get_ident())
             self.token.request()
             check_cancelled()
@@ -199,8 +199,8 @@ class ServiceCancellationTests(unittest.TestCase):
 
     def test_uncancelled_archive_reads_each_invoice_once(self) -> None:
         rows = [SimpleNamespace(external_id=str(index)) for index in range(6)]
-        with (cancellation_scope(self.token), patch.object(reader, "authenticated_reader_session", side_effect=lambda _state: nullcontext(object())),
-              patch.object(reader, "read_invoice_page", side_effect=lambda _page, identifier: identifier) as read):
+        with (cancellation_scope(self.token), patch.object(reader, "authenticated_reader_session", side_effect=lambda _state, **_kwargs: nullcontext(object())),
+              patch.object(reader, "read_invoice_page", side_effect=lambda _page, identifier, **_kwargs: identifier) as read):
             self.assertEqual(sorted(reader._read_archive_batches(rows, {}, lambda _text: None)), [str(index) for index in range(6)])
         self.assertEqual(read.call_count, 6)
 
@@ -268,6 +268,15 @@ class ServiceCancellationTests(unittest.TestCase):
               self.assertRaises(TimeoutError)):
             download.wait_for_network_idle(page)
         page.wait_for_load_state.assert_called_once_with("networkidle", timeout=250)
+
+    def test_extended_network_wait_preserves_deadline_and_cancellation_polling(self) -> None:
+        page = MagicMock()
+        page.wait_for_load_state.side_effect = TimeoutError("still waiting")
+        with (cancellation_scope(self.token), patch.object(download.time, "monotonic", side_effect=[0, 0, 35, 35, 60.001]),
+              self.assertRaises(TimeoutError)):
+            download.wait_for_network_idle(page, timeout=60_000)
+        self.assertEqual(page.wait_for_load_state.call_count, 2)
+        self.assertTrue(all(call.kwargs["timeout"] <= 250 for call in page.wait_for_load_state.call_args_list))
 
 
 if __name__ == "__main__":

@@ -131,8 +131,8 @@ class _ReadOnlyPage:
             self.calls,
         )
 
-    def goto(self, url, *, wait_until):
-        self.calls.append(("goto", url, wait_until))
+    def goto(self, url, *, wait_until, timeout):
+        self.calls.append(("goto", url, wait_until, timeout))
         self.url = url
 
     def get_by_role(self, role, **kwargs):
@@ -315,9 +315,9 @@ class WebInvoiceParserTests(unittest.TestCase):
         self.assertEqual(
             page.calls[:4],
             [
-                ("goto", f"{reader.ORIGIN}/invoices/{external_id}", "domcontentloaded"),
+                ("goto", f"{reader.ORIGIN}/invoices/{external_id}", "domcontentloaded", 30_000),
                 ("get_by_role", "tabpanel", "請求書情報"),
-                ("region_wait", {"state": "visible"}),
+                ("region_wait", {"state": "visible", "timeout": 30_000}),
                 ("wait_for_load_state", "networkidle", 30_000),
             ],
         )
@@ -329,6 +329,37 @@ class WebInvoiceParserTests(unittest.TestCase):
 
         parser.assert_called_once()
         self.assertEqual(parser.call_args.kwargs["external_id"], external_id)
+
+    def test_longer_wait_covers_navigation_region_and_network(self) -> None:
+        page = _ReadOnlyPage()
+        reader.read_invoice_page(page, str(uuid4()), timeout_ms=120_000)
+        self.assertEqual(page.calls[0][-1], 120_000)
+        self.assertIn(("region_wait", {"state": "visible", "timeout": 120_000}), page.calls)
+        self.assertIn(("wait_for_load_state", "networkidle", 120_000), page.calls)
+
+    def test_placeholder_can_finish_after_thirty_seconds_with_longer_wait(self) -> None:
+        page = _ReadOnlyPage(rows=[["該当項目なし", "0", "10%", "0", "0", "", "", ""]])
+        waits = []
+
+        def wait(milliseconds):
+            waits.append(milliseconds)
+            if len(waits) == 2:
+                page.panel.region._rows = [assessment_row()]
+
+        page.wait_for_timeout = wait
+        with patch.object(reader.time, "monotonic", side_effect=[0, 0, 35]):
+            result = reader.read_invoice_page(page, str(uuid4()), timeout_ms=60_000)
+        self.assertEqual(len(result.lines), 1)
+        self.assertEqual(waits, [250, 250])
+
+    def test_extended_placeholder_wait_still_has_a_deadline(self) -> None:
+        page = _ReadOnlyPage(rows=[["該当項目なし", "0", "10%", "0", "0", "", "", ""]])
+        waits = []
+        page.wait_for_timeout = lambda milliseconds: waits.append(milliseconds)
+        with patch.object(reader.time, "monotonic", side_effect=[0, 0, 60.001]):
+            with self.assertRaises(reader.InvoiceReadError):
+                reader.read_invoice_page(page, str(uuid4()), timeout_ms=60_000)
+        self.assertEqual(waits, [250])
 
     def test_page_reader_does_not_wait_when_rows_are_ready(self) -> None:
         page = _ReadOnlyPage()
@@ -584,13 +615,13 @@ class ArchivedHistorySyncTests(unittest.TestCase):
         received_states = []
 
         @contextmanager
-        def fake_session(storage_state):
+        def fake_session(storage_state, *, timeout_ms):
             page = SimpleNamespace(creator_thread=threading.get_ident(), token=object())
             created_pages.append(page)
             received_states.append(storage_state)
             yield page
 
-        def fake_read(page, external_id):
+        def fake_read(page, external_id, *, timeout_ms):
             self.assertEqual(page.creator_thread, threading.get_ident())
             return web_read(row_by_id[external_id], [])
 
@@ -604,6 +635,65 @@ class ArchivedHistorySyncTests(unittest.TestCase):
         self.assertEqual(len({id(page) for page in created_pages}), 3)
         self.assertEqual(received_states, [storage_state] * 3)
         self.assertEqual({item.external_id for item in results}, set(row_by_id))
+
+    def test_selected_parallelism_and_wait_reach_each_reader(self) -> None:
+        for parallel_count, size in ((1, 4), (2, 7), (10, 13), (10, 2)):
+            with self.subTest(parallel_count=parallel_count, size=size):
+                rows = [csv_row(str(uuid4())) for _ in range(size)]
+                row_by_id = {row.external_id: row for row in rows}
+                sessions = []
+                session_lock = threading.Lock()
+                session_threads = set()
+                ready = threading.Barrier(min(parallel_count, size))
+
+                @contextmanager
+                def session(state, *, timeout_ms):
+                    page = SimpleNamespace(thread=threading.get_ident())
+                    with session_lock:
+                        sessions.append((state, timeout_ms))
+                        session_threads.add(page.thread)
+                    ready.wait(timeout=5)
+                    yield page
+
+                def read(page, identifier, *, timeout_ms):
+                    self.assertEqual(page.thread, threading.get_ident())
+                    self.assertEqual(timeout_ms, 120_000)
+                    return web_read(row_by_id[identifier], [])
+
+                with patch.object(reader, "authenticated_reader_session", side_effect=session), patch.object(
+                    reader, "read_invoice_page", side_effect=read,
+                ) as detail:
+                    results = reader._read_archive_batches(rows, {}, lambda _message: None,
+                                                          parallel_count=parallel_count, timeout_ms=120_000)
+                self.assertEqual(sessions, [({}, 120_000)] * min(parallel_count, size))
+                self.assertEqual(len(session_threads), min(parallel_count, size))
+                self.assertEqual(detail.call_count, size)
+                self.assertEqual({item.external_id for item in results}, set(row_by_id))
+
+    def test_import_options_reach_single_and_multiple_invoice_paths(self) -> None:
+        for size in (1, 2):
+            with self.subTest(size=size):
+                rows = [csv_row(str(uuid4())) for _ in range(size)]
+                results = [web_read(row, [AllocationLine("NEW", "工種", 1_000, "10", 100, 1_100)])
+                           for row in rows]
+                with self._patched_export(rows), patch.object(reader, "read_invoice_page", return_value=results[0]) as detail, patch.object(
+                    reader, "_read_archive_batches", return_value=results,
+                ) as batches:
+                    reader.sync_archived_history(full_refresh=True, wait_seconds=180, parallel_count=10)
+                    self.assertEqual(reader.export_session.call_args.kwargs["timeout_ms"], 180_000)
+                    self.assertEqual(reader.download_csv.call_args.kwargs["timeout_ms"], 180_000)
+                target = detail if size == 1 else batches
+                self.assertEqual(target.call_args.kwargs["timeout_ms"], 180_000)
+                if size > 1:
+                    self.assertEqual(batches.call_args.kwargs["parallel_count"], 10)
+
+    def test_invalid_import_options_fail_before_web_or_history_changes(self) -> None:
+        for kwargs in ({"parallel_count": 0}, {"parallel_count": 11}, {"wait_seconds": 0},
+                       {"wait_seconds": 45}, {"wait_seconds": True}):
+            with self.subTest(kwargs=kwargs), patch.object(reader, "export_session") as export:
+                with self.assertRaisesRegex(reader.InvoiceReadError, "設定が不正"):
+                    reader.sync_archived_history(**kwargs)
+                export.assert_not_called()
 
     def _patched_export(self, rows):
         export_page = _ExportPage()

@@ -51,7 +51,7 @@ def _wait_for_search_debounce(page) -> None:
     check_cancelled()
 
 
-def _open_export_dialog(page, title: str):
+def _open_export_dialog(page, title: str, *, timeout_ms: int = 5000):
     from playwright.sync_api import expect
 
     dialog = page.get_by_role("dialog", name=title, exact=True)
@@ -61,7 +61,7 @@ def _open_export_dialog(page, title: str):
         check_cancelled()
         page.get_by_role("button", name=title, exact=True).click()
         try:
-            expect(dialog).to_be_visible(timeout=5000)
+            expect(dialog).to_be_visible(timeout=timeout_ms)
             check_cancelled()
             return dialog
         except AssertionError:
@@ -72,10 +72,13 @@ def _open_export_dialog(page, title: str):
 
 
 @contextmanager
-def export_session(progress: Callable[[str], None], *, archived_only: bool = False):
+def export_session(progress: Callable[[str], None], *, archived_only: bool = False,
+                   timeout_ms: int | None = None):
     from playwright.sync_api import Error, TimeoutError, expect, sync_playwright
 
     check_cancelled()
+    assertion_timeout_ms = 5000 if timeout_ms is None else timeout_ms
+    timeout_ms = 30_000 if timeout_ms is None else timeout_ms
     try:
         email, password = load_credentials()
     except ValueError as exc:
@@ -91,7 +94,7 @@ def export_session(progress: Callable[[str], None], *, archived_only: bool = Fal
                 context = browser.new_context(accept_downloads=True, locale="ja-JP")
                 check_cancelled()
                 page = context.new_page()
-                page.set_default_timeout(30_000)
+                page.set_default_timeout(timeout_ms)
                 progress("Digital Billderにログインしています…")
                 page.goto(APPLICATIONS_URL, wait_until="domcontentloaded")
                 check_cancelled()
@@ -102,9 +105,9 @@ def export_session(progress: Callable[[str], None], *, archived_only: bool = Fal
                 page.locator("#signin-button-login").click()
                 try:
                     check_cancelled()
-                    page.wait_for_url(APPLICATIONS_URL, timeout=30_000)
+                    page.wait_for_url(APPLICATIONS_URL, timeout=timeout_ms)
                     check_cancelled()
-                    expect(page.get_by_role("radio", name="すべて", exact=True)).to_be_visible()
+                    expect(page.get_by_role("radio", name="すべて", exact=True)).to_be_visible(timeout=assertion_timeout_ms)
                 except (TimeoutError, AssertionError):
                     check_cancelled()
                     raise DownloadError("ログインできません。ログイン情報、追加認証、通信状態を確認してください。") from None
@@ -114,17 +117,17 @@ def export_session(progress: Callable[[str], None], *, archived_only: bool = Fal
                 check_cancelled()
                 page.locator("label").filter(has=all_radio).click()
                 check_cancelled()
-                expect(all_radio).to_be_checked()
+                expect(all_radio).to_be_checked(timeout=assertion_timeout_ms)
                 pattern = r"^保管済\s+Alt" if archived_only else r"^破棄済を除くすべて"
                 active_radio = page.get_by_role("radio", name=re.compile(pattern))
                 check_cancelled()
                 page.locator("label").filter(has=active_radio).click()
                 check_cancelled()
-                expect(active_radio).to_be_checked()
+                expect(active_radio).to_be_checked(timeout=assertion_timeout_ms)
                 # Wait for the debounced search and rendering to finish before export.
                 _wait_for_search_debounce(page)
-                wait_for_network_idle(page)
-                expect(page.get_by_text(re.compile(r"検索結果:\s*\d+\s*件"))).to_be_visible(timeout=30_000)
+                wait_for_network_idle(page, timeout=timeout_ms)
+                expect(page.get_by_text(re.compile(r"検索結果:\s*\d+\s*件"))).to_be_visible(timeout=timeout_ms)
                 check_cancelled()
                 yield page
             finally:
@@ -143,7 +146,7 @@ def export_session(progress: Callable[[str], None], *, archived_only: bool = Fal
         ) from None
 
 
-def download_csv(page, destination: Path) -> Path | None:
+def download_csv(page, destination: Path, *, timeout_ms: int | None = None) -> Path | None:
     check_cancelled()
     text = page.get_by_text(re.compile(r"検索結果:\s*\d+\s*件")).inner_text()
     check_cancelled()
@@ -152,8 +155,8 @@ def download_csv(page, destination: Path) -> Path | None:
         raise DownloadError("検索結果の件数を確認できません。画面変更の可能性があります。")
     if int(match.group(1)) == 0:
         return None
-    dialog = _open_export_dialog(page, "CSV全件ダウンロード")
-    with page.expect_download(timeout=180_000) as pending:
+    dialog = _open_export_dialog(page, "CSV全件ダウンロード", timeout_ms=timeout_ms or 5000)
+    with page.expect_download(timeout=max(180_000, timeout_ms or 0)) as pending:
         check_cancelled()
         dialog.get_by_role("button", name=CSV_FORMAT, exact=True).click()
     check_cancelled()
@@ -186,7 +189,7 @@ def download_zip(page, destination: Path) -> Path:
 
 
 @contextmanager
-def authenticated_reader_session(storage_state):
+def authenticated_reader_session(storage_state, *, timeout_ms: int = 30_000):
     """Use in-memory session state in a dedicated thread; never persist cookies."""
     from playwright.sync_api import Error, sync_playwright
 
@@ -199,7 +202,7 @@ def authenticated_reader_session(storage_state):
                 context = browser.new_context(storage_state=storage_state, locale="ja-JP")
                 check_cancelled()
                 page = context.new_page()
-                page.set_default_timeout(30_000)
+                page.set_default_timeout(timeout_ms)
                 check_cancelled()
                 yield page
             finally:

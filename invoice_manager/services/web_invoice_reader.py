@@ -15,6 +15,9 @@ from invoice_manager.services.csv_reader import read_invoice_csv
 from invoice_manager.services.digital_billder_download import DownloadError, authenticated_reader_session, download_csv, export_session, wait_for_network_idle
 from invoice_manager.services.web_allocation_plan import AllocationLine, AllocationPlan
 from invoice_manager.services.operation_cancellation import check_cancelled, current_token, cancellation_scope, begin_commit
+from invoice_manager.services.history_import_options import (
+    DEFAULT_WAIT_SECONDS, DEFAULT_PARALLEL_COUNT, WAIT_SECONDS_OPTIONS, PARALLEL_COUNT_OPTIONS,
+)
 
 ORIGIN = "https://purchases.digitalbillder.com"
 ASSESSMENT_REGION = "査定入力テーブル - パンしてスクロール可能"
@@ -77,17 +80,17 @@ def parse_assessment_rows(headers, rows, *, external_id: str | None = None) -> t
     return tuple(lines)
 
 
-def read_invoice_page(page, external_id: str) -> WebInvoiceRead:
+def read_invoice_page(page, external_id: str, *, timeout_ms: int = 30_000) -> WebInvoiceRead:
     """Navigate to one validated ID and inspect the rendered read-only tables."""
     check_cancelled()
     UUID(external_id)
-    page.goto(f"{ORIGIN}/invoices/{external_id}", wait_until="domcontentloaded")
+    page.goto(f"{ORIGIN}/invoices/{external_id}", wait_until="domcontentloaded", timeout=timeout_ms)
     check_cancelled()
     panel = page.get_by_role("tabpanel", name="請求書情報", exact=True)
     region = panel.get_by_role("region", name=ASSESSMENT_REGION, exact=True)
-    region.wait_for(state="visible")
+    region.wait_for(state="visible", timeout=timeout_ms)
     check_cancelled()
-    wait_for_network_idle(page)
+    wait_for_network_idle(page, timeout=timeout_ms)
     deadline = None
     while True:
         check_cancelled()
@@ -102,7 +105,7 @@ def read_invoice_page(page, external_id: str) -> WebInvoiceRead:
                 or not any(cells[0].strip() == "該当項目なし" for cells in rows)):
             break
         if deadline is None:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + timeout_ms / 1000
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -166,13 +169,14 @@ def _cached_snapshot_matches(snapshot, row) -> bool:
     ) == (row.project_code, row.project_name, row.vendor_name, str(row.invoice_date), row.total_amount)
 
 
-def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]:
-    """Up to three independent reader threads; Playwright objects never cross threads."""
+def _read_archive_batches(rows, storage_state, progress, *, timeout_ms: int = 30_000,
+                          parallel_count: int = DEFAULT_PARALLEL_COUNT) -> list[WebInvoiceRead]:
+    """Independent reader threads; Playwright objects never cross threads."""
     check_cancelled()
     if not rows:
         return []
     token = current_token()
-    count = min(3, len(rows))
+    count = min(parallel_count, len(rows))
     batches = [rows[index::count] for index in range(count)]
     completed = 0
     progress_lock = threading.Lock()
@@ -180,10 +184,10 @@ def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]
     def read_batch(batch):
         nonlocal completed
         results = []
-        with cancellation_scope(token), authenticated_reader_session(storage_state) as page:
+        with cancellation_scope(token), authenticated_reader_session(storage_state, timeout_ms=timeout_ms) as page:
             for row in batch:
                 check_cancelled()
-                result = read_invoice_page(page, row.external_id)
+                result = read_invoice_page(page, row.external_id, timeout_ms=timeout_ms)
                 check_cancelled()
                 results.append(result)
                 with progress_lock:
@@ -203,6 +207,7 @@ def _read_archive_batches(rows, storage_state, progress) -> list[WebInvoiceRead]
 
 def sync_archived_history(
     progress=lambda _message: None, *, full_refresh: bool = False, project_code: str | None = None,
+    wait_seconds: int = DEFAULT_WAIT_SECONDS, parallel_count: int = DEFAULT_PARALLEL_COUNT,
 ) -> str:
     from invoice_manager.services.historical_costs import (
         ArchivedAllocationSnapshot, ArchivedInvoiceSnapshot, load_active_archived_snapshots,
@@ -210,6 +215,10 @@ def sync_archived_history(
     )
 
     check_cancelled()
+    if (type(wait_seconds) is not int or wait_seconds not in WAIT_SECONDS_OPTIONS
+            or type(parallel_count) is not int or parallel_count not in PARALLEL_COUNT_OPTIONS):
+        raise InvoiceReadError("待機時間または並列数の設定が不正です。取得設定を選び直してください。")
+    timeout_ms = wait_seconds * 1000
     if not _sync_lock.acquire(blocking=False):
         raise InvoiceReadError("保管済み履歴の取得を実行中です。")
     stage = "準備"
@@ -224,9 +233,9 @@ def sync_archived_history(
         reused = 0
         read_results = []
         with tempfile.TemporaryDirectory(prefix="digitalbillder_history_") as folder:
-            with export_session(progress, archived_only=True) as page:
+            with export_session(progress, archived_only=True, timeout_ms=timeout_ms) as page:
                 stage = "保管済み一覧のCSV読込み"
-                path = download_csv(page, Path(folder) / "archived.csv")
+                path = download_csv(page, Path(folder) / "archived.csv", timeout_ms=timeout_ms)
                 check_cancelled()
                 rows, errors, _encoding = read_invoice_csv(path) if path else ([], [], None)
                 if errors or len({row.external_id for row in rows}) != len(rows):
@@ -245,13 +254,14 @@ def sync_archived_history(
                 progress(f"{target_label}: 保管済み{len(target_rows)}件: 確認済み{reused}件 / 詳細取得{len(pending)}件")
                 if len(pending) == 1:
                     stage = "保管済み請求の詳細読込み"
-                    read_results.append(read_invoice_page(page, pending[0].external_id))
+                    read_results.append(read_invoice_page(page, pending[0].external_id, timeout_ms=timeout_ms))
                 # Authentication state stays in process memory, never in files or logs.
                 session_state = page.context.storage_state() if len(pending) > 1 else None
                 check_cancelled()
             if len(pending) > 1:
                 stage = "保管済み請求の詳細読込み"
-                read_results = _read_archive_batches(pending, session_state, progress)
+                read_results = _read_archive_batches(pending, session_state, progress,
+                                                   timeout_ms=timeout_ms, parallel_count=parallel_count)
             by_id = {result.external_id: result for result in read_results}
             if len(read_results) != len(pending) or len(by_id) != len(pending) or set(by_id) != {row.external_id for row in pending}:
                 raise InvoiceReadError("取得した請求ID・件数が一致しません。履歴は更新していません。")

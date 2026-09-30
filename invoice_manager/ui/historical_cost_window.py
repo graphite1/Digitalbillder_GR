@@ -18,6 +18,10 @@ from invoice_manager.services.historical_costs import (
     list_historical_work_type_suggestions,
 )
 from invoice_manager.services.digital_billder_download import DownloadError
+from invoice_manager.services.history_import_options import (
+    WAIT_SECONDS_OPTIONS, PARALLEL_COUNT_OPTIONS, DEFAULT_WAIT_SECONDS, DEFAULT_PARALLEL_COUNT,
+    WAIT_SECONDS_SETTING, PARALLEL_COUNT_SETTING, saved_choice,
+)
 from invoice_manager.utils.money_utils import format_amount
 from invoice_manager.ui.background_activity import BackgroundActivity, ActivityPanel
 from invoice_manager.services.operation_cancellation import (
@@ -43,6 +47,12 @@ class HistoricalCostWindow(tk.Toplevel):
 
         self.project_var = tk.StringVar(value=ALL_LABEL)
         self.refresh_project_var = tk.StringVar(value=ALL_LABEL)
+        self.wait_seconds_var = tk.StringVar(value=str(saved_choice(
+            get_app_setting(WAIT_SECONDS_SETTING), WAIT_SECONDS_OPTIONS, DEFAULT_WAIT_SECONDS,
+        )))
+        self.parallel_count_var = tk.StringVar(value=str(saved_choice(
+            get_app_setting(PARALLEL_COUNT_SETTING), PARALLEL_COUNT_OPTIONS, DEFAULT_PARALLEL_COUNT,
+        )))
         self.vendor_var = tk.StringVar(value=ALL_LABEL)
         self.work_type_var = tk.StringVar(value=ALL_LABEL)
         self.suggestion_vendor_var = tk.StringVar()
@@ -86,6 +96,15 @@ class HistoricalCostWindow(tk.Toplevel):
         )
         self.refresh_project_combo.pack(anchor=tk.W, pady=(2, 0))
         self.refresh_project_combo.bind("<<ComboboxSelected>>", self._remember_refresh_project)
+        settings = ttk.Frame(self, padding=(10, 0, 10, 6))
+        settings.pack(fill=tk.X)
+        self.wait_seconds_combo = self._filter_combo(settings, "画面の待機時間（秒）", self.wait_seconds_var, 10)
+        self.wait_seconds_combo.configure(values=[str(value) for value in WAIT_SECONDS_OPTIONS])
+        self.parallel_count_combo = self._filter_combo(settings, "並列数", self.parallel_count_var, 8)
+        self.parallel_count_combo.configure(values=[str(value) for value in PARALLEL_COUNT_OPTIONS])
+        for combo in (self.wait_seconds_combo, self.parallel_count_combo):
+            combo.bind("<<ComboboxSelected>>", self._remember_import_options)
+        ttk.Label(settings, text="画面表示や通信が落ち着くまで待つ上限です。\n処理全体の制限ではありません。", wraplength=600).pack(side=tk.LEFT)
         ttk.Label(self, text="実績履歴は、アプリ利用前の請求を手打ちせず取り込むためのものです。履歴候補は会社別によく使う工種を確認する参考情報です。", wraplength=1000).pack(anchor=tk.W, padx=10)
         ttk.Label(self, text="通常は確認済み明細を再利用します。過去の査定だけをWebで修正したときは「全件を再検証」を使ってください。", wraplength=1000).pack(anchor=tk.W, padx=10, pady=(2, 4))
         self.history_status = ttk.Label(self, text="", wraplength=1000)
@@ -259,6 +278,14 @@ class HistoricalCostWindow(tk.Toplevel):
         code = self.refresh_project_codes.get(self.refresh_project_var.get())
         set_app_setting(ARCHIVE_REFRESH_PROJECT_SETTING, code or "")
 
+    def _remember_import_options(self, _event=None) -> None:
+        set_app_setting(WAIT_SECONDS_SETTING, self.wait_seconds_var.get())
+        set_app_setting(PARALLEL_COUNT_SETTING, self.parallel_count_var.get())
+
+    def _enable_import_options(self, enabled: bool) -> None:
+        for combo in (self.wait_seconds_combo, self.parallel_count_combo):
+            combo.configure(state="readonly" if enabled else tk.DISABLED)
+
     def refresh_costs(self) -> None:
         self.cost_tree.delete(*self.cost_tree.get_children())
         rows = list_costs(
@@ -323,7 +350,10 @@ class HistoricalCostWindow(tk.Toplevel):
         callback = self.on_full_refresh_history if full else self.on_refresh_history
         if callback is None or self.busy or self.closing:
             return
+        wait_seconds = int(self.wait_seconds_var.get())
+        parallel_count = int(self.parallel_count_var.get())
         self.busy = True
+        self._enable_import_options(False)
         if self.refresh_button is not None:
             self.refresh_button.configure(state=tk.DISABLED)
         if self.full_refresh_button is not None:
@@ -354,6 +384,10 @@ class HistoricalCostWindow(tk.Toplevel):
                 accepts_project_code = "project_code" in parameters
                 with cancellation_scope(token):
                     kwargs = {"project_code": target_code} if accepts_project_code else {}
+                    if "wait_seconds" in parameters:
+                        kwargs["wait_seconds"] = wait_seconds
+                    if "parallel_count" in parameters:
+                        kwargs["parallel_count"] = parallel_count
                     result = callback(progress, **kwargs) if accepts_progress else callback(**kwargs)
             except OperationCancelled as exc:
                 events.put(("cancelled", str(exc)))
@@ -377,6 +411,7 @@ class HistoricalCostWindow(tk.Toplevel):
                     self.activity.update(str(value))
                 elif kind == "cancelled":
                     self.busy = False
+                    self._enable_import_options(True)
                     if self.refresh_button is not None:
                         self.refresh_button.configure(state=tk.NORMAL)
                     if self.full_refresh_button is not None:
@@ -398,6 +433,7 @@ class HistoricalCostWindow(tk.Toplevel):
             self.poll_id = self.after(100, self._poll_events)
 
     def _refresh_completed(self, result: object) -> None:
+        self._enable_import_options(True)
         if self.refresh_button is not None:
             self.refresh_button.configure(state=tk.NORMAL)
         if self.full_refresh_button is not None:
@@ -407,6 +443,7 @@ class HistoricalCostWindow(tk.Toplevel):
         self.activity.finish(message)
 
     def _refresh_failed(self, error: Exception) -> None:
+        self._enable_import_options(True)
         if self.refresh_button is not None:
             self.refresh_button.configure(state=tk.NORMAL)
         if self.full_refresh_button is not None:

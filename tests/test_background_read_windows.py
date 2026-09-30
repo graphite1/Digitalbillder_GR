@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from invoice_manager.services.web_allocation_plan import AllocationPlan
 from invoice_manager.ui.historical_cost_window import HistoricalCostWindow
+from invoice_manager.services.history_import_options import WAIT_SECONDS_SETTING, PARALLEL_COUNT_SETTING
 from invoice_manager.ui.web_allocation_preview_window import WebAllocationPreviewWindow
 
 
@@ -26,6 +27,9 @@ class BackgroundReadWindowsTests(unittest.TestCase):
                          return_value=SimpleNamespace(last_successful_refresh=None, active_invoice_count=0))
         self.start_patch("invoice_manager.ui.historical_cost_window.has_historical_costs", return_value=False)
         self.start_patch("invoice_manager.ui.historical_cost_window.list_costs", return_value=[])
+        self.start_patch("invoice_manager.ui.historical_cost_window.list_projects", return_value=[])
+        self.start_patch("invoice_manager.ui.historical_cost_window.get_app_setting", return_value="")
+        self.start_patch("invoice_manager.ui.historical_cost_window.set_app_setting")
         self.start_patch("invoice_manager.ui.web_allocation_preview_window.WebWriteGuard",
                          return_value=SimpleNamespace(status=lambda: SimpleNamespace(state="unverified", reason="test")))
         self.plan = AllocationPlan("test", "P1", "Test Vendor", "2026-09-06", 0, (), ())
@@ -155,6 +159,56 @@ class BackgroundReadWindowsTests(unittest.TestCase):
             self.assertEqual(received, ["P001"])
             window.close()
         self.assert_no_dialogs()
+
+    def test_history_import_choices_persist_and_reach_both_refresh_actions(self):
+        saved = {}
+        received = []
+
+        def refresh(progress, *, wait_seconds, parallel_count):
+            received.append((wait_seconds, parallel_count))
+            self.entered.set()
+            self.release.wait(5)
+            return "History saved"
+
+        with patch("invoice_manager.ui.historical_cost_window.get_app_setting", side_effect=lambda key: saved.get(key, "")), patch(
+            "invoice_manager.ui.historical_cost_window.set_app_setting", side_effect=lambda key, value: saved.update({key: value}),
+        ):
+            window = HistoricalCostWindow(self.root, on_refresh_history=refresh, on_full_refresh_history=refresh)
+            self.assertEqual((window.wait_seconds_var.get(), window.parallel_count_var.get()), ("60", "3"))
+            self.assertEqual(list(window.parallel_count_combo["values"]), [str(value) for value in range(1, 11)])
+            window.wait_seconds_var.set("120")
+            window.parallel_count_var.set("10")
+            window._remember_import_options()
+            window.close()
+            self.assertEqual(saved[WAIT_SECONDS_SETTING], "120")
+            self.assertEqual(saved[PARALLEL_COUNT_SETTING], "10")
+
+            window = HistoricalCostWindow(self.root, on_refresh_history=refresh, on_full_refresh_history=refresh)
+            self.assertEqual((window.wait_seconds_var.get(), window.parallel_count_var.get()), ("120", "10"))
+            for full in (False, True):
+                self.entered.clear()
+                self.release.clear()
+                window._run_refresh(full=full)
+                self.pump_until(self.entered.is_set)
+                self.assertEqual(str(window.wait_seconds_combo["state"]), "disabled")
+                self.assertEqual(str(window.parallel_count_combo["state"]), "disabled")
+                self.release.set()
+                self.pump_until(lambda: not window.busy)
+                self.assertEqual(str(window.wait_seconds_combo["state"]), "readonly")
+                self.assertEqual(str(window.parallel_count_combo["state"]), "readonly")
+            self.assertEqual(received, [(120, 10), (120, 10)])
+            window.close()
+        self.assert_no_dialogs()
+
+    def test_history_invalid_saved_options_fall_back_without_overwriting_settings(self):
+        with patch("invoice_manager.ui.historical_cost_window.get_app_setting", return_value="invalid"), patch(
+            "invoice_manager.ui.historical_cost_window.set_app_setting",
+        ) as save:
+            window = HistoricalCostWindow(self.root)
+            self.assertEqual((window.wait_seconds_var.get(), window.parallel_count_var.get()), ("60", "3"))
+            self.assertNotIn(WAIT_SECONDS_SETTING, [call.args[0] for call in save.call_args_list])
+            self.assertNotIn(PARALLEL_COUNT_SETTING, [call.args[0] for call in save.call_args_list])
+            window.close()
 
     def test_web_failure_finishes_activity_and_enables_retry(self):
         self.start_patch("invoice_manager.ui.web_allocation_preview_window.read_for_plan",
