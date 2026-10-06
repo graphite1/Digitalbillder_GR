@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.exceptions import InvalidSignature
 from tools import build_windows_setup as builder
 from updater.security import b64url_encode
+from updater.config import DEFAULT_UPDATE_BASE_URL
 
 
 class SetupBuilderTests(unittest.TestCase):
@@ -43,6 +44,9 @@ class SetupBuilderTests(unittest.TestCase):
         result = builder.read_distribution(self.manifest, self.archive)
         config = builder.setup_config(result)
         self.assertIn('/api/installers/3/download', config)
+        self.assertIn(DEFAULT_UPDATE_BASE_URL + '/api/installers/3/download', config)
+        setup_source = (builder.ROOT / 'tools/windows/Setup.cs').read_text(encoding='utf8')
+        self.assertIn('private const string FixedOrigin = "' + DEFAULT_UPDATE_BASE_URL + '";', setup_source)
         self.assertIn(result['archive']['sha256'], config)
         self.assertNotIn(str(self.root), config)
 

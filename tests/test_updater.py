@@ -28,6 +28,8 @@ from updater import (
     stage_update,
 )
 from updater.archive import validate_archive
+from updater.errors import DownloadError
+from updater.config import DEFAULT_UPDATE_BASE_URL, LEGACY_OFFICIAL_UPDATE_BASE_URL
 from updater.security import b64url_encode, verify_release_envelope
 
 
@@ -150,6 +152,85 @@ class UpdaterTests(unittest.TestCase):
             self.envelope, self.keys, base_url=BASE_URL, runtime_fingerprint=RUNTIME
         )
 
+    def test_bridge_origin_moves_only_official_channel_and_retries_without_state(self):
+        for source, target in (
+            (LEGACY_OFFICIAL_UPDATE_BASE_URL, DEFAULT_UPDATE_BASE_URL),
+            (LEGACY_OFFICIAL_UPDATE_BASE_URL.upper() + ":443/", DEFAULT_UPDATE_BASE_URL),
+            (BASE_URL, BASE_URL),
+            (LEGACY_OFFICIAL_UPDATE_BASE_URL + ":8443", LEGACY_OFFICIAL_UPDATE_BASE_URL + ":8443"),
+            (LEGACY_OFFICIAL_UPDATE_BASE_URL + ".example.test", LEGACY_OFFICIAL_UPDATE_BASE_URL + ".example.test"),
+        ):
+            with self.subTest(source=source):
+                url = target + "/api/releases/latest"
+                with self.assertRaises(DownloadError):
+                    check_for_update(source, self.keys, current_sequence=0,
+                                     runtime_fingerprint=RUNTIME, opener=FakeOpener({}))
+                opener = FakeOpener({url: self.envelope})
+                manifest = check_for_update(source, self.keys, current_sequence=0,
+                                            runtime_fingerprint=RUNTIME, opener=opener)
+                self.assertEqual(manifest.base_url, target)
+                self.assertEqual(opener.urls, [url])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_hub_keeps_product_signature_and_sequence_checks(self):
+        url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
+        wrong_product = signed_envelope(self.private_key, self.archive,
+            mutate_payload=lambda payload: payload.update(product="CivilCore"))
+        tampered = json.loads(self.envelope)
+        tampered["signature"] = b64url_encode(bytes(64))
+        for envelope in (wrong_product, canonical(tampered)):
+            with self.subTest(envelope=envelope[:20]), self.assertRaises(ManifestError):
+                check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                    current_sequence=0, runtime_fingerprint=RUNTIME,
+                    opener=FakeOpener({url: envelope}))
+        self.assertIsNone(check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=1, runtime_fingerprint=RUNTIME,
+            opener=FakeOpener({url: self.envelope})))
+        with self.assertRaises(DownloadError):
+            check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                current_sequence=0, runtime_fingerprint=RUNTIME,
+                opener=lambda *_args, **_kwargs: FakeResponse(self.envelope,
+                    LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"))
+
+    def test_bridge_activation_failure_retry_and_next_hub_update_preserve_data(self):
+        data = self.root / "user-data"
+        data.mkdir()
+        settings = data / "settings.json"
+        settings.write_bytes(b'{"custom":"preserved"}')
+        with closing(sqlite3.connect(data / "app.db")) as connection:
+            connection.execute("CREATE TABLE ledger(value TEXT)")
+            connection.execute("INSERT INTO ledger VALUES ('preserved')")
+            connection.commit()
+        # Simulate the fixed old updater receiving the signed bridge from the
+        # old origin. Its verification and activation protocol stays unchanged.
+        bridge = verify_release_envelope(self.envelope, self.keys,
+            base_url=LEGACY_OFFICIAL_UPDATE_BASE_URL, runtime_fingerprint=RUNTIME)
+        def stage(manifest, archive):
+            url = manifest.base_url + f"/api/releases/{manifest.sequence}/download"
+            stage_update(manifest, self.root, opener=FakeOpener({url: archive}))
+        def activate(healthy):
+            return activate_pending(self.root, self.keys, data_dir=data,
+                runtime_fingerprint=RUNTIME, launch_healthcheck=lambda *_: healthy)
+        stage(bridge, self.archive)
+        with self.assertRaises(ActivationError):
+            activate(False)
+        self.assertEqual(resolve_active_release(self.root, self.keys,
+            runtime_fingerprint=RUNTIME), self.root)
+        stage(bridge, self.archive)
+        self.assertTrue(activate(True).activated)
+        next_archive = release_zip(version="1.0.2", sequence=2)
+        next_envelope = signed_envelope(self.private_key, next_archive,
+            version="1.0.2", sequence=2)
+        next_manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=1, runtime_fingerprint=RUNTIME,
+            opener=FakeOpener({DEFAULT_UPDATE_BASE_URL + "/api/releases/latest": next_envelope}))
+        self.assertEqual(next_manifest.base_url, DEFAULT_UPDATE_BASE_URL)
+        stage(next_manifest, next_archive)
+        self.assertTrue(activate(True).activated)
+        self.assertEqual(settings.read_bytes(), b'{"custom":"preserved"}')
+        with closing(sqlite3.connect(data / "app.db")) as connection:
+            self.assertEqual(connection.execute("SELECT value FROM ledger").fetchone(), ("preserved",))
+
     def test_check_uses_fixed_same_origin_urls_and_rejects_tampering(self):
         opener = FakeOpener({BASE_URL + "/api/releases/latest": self.envelope})
         manifest = check_for_update(
@@ -164,7 +245,8 @@ class UpdaterTests(unittest.TestCase):
             opener=FakeOpener({BASE_URL + "/api/releases/latest": self.envelope}),
         ))
         damaged = json.loads(self.envelope)
-        damaged["signature"] = "A" + damaged["signature"][1:]
+        first = "B" if damaged["signature"][0] == "A" else "A"
+        damaged["signature"] = first + damaged["signature"][1:]
         with self.assertRaisesRegex(ManifestError, "署名"):
             verify_release_envelope(
                 canonical(damaged), self.keys, base_url=BASE_URL, runtime_fingerprint=RUNTIME

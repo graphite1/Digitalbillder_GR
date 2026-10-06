@@ -219,7 +219,7 @@ namespace DigitalbuilderGR.WindowsSetup
         private const int InitializeTimeoutSeconds = 180;
         private const string SetupPrefix = ".Digitalbuilder-setup-";
         private const string ProductExeName = "Digitalbuilder GR.exe";
-        private const string FixedOrigin = "https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site";
+        private const string FixedOrigin = "https://gr-release-hub.rinntyu2000.chatgpt.site";
 
         internal SetupResult Install(SetupOptions options, Action<InstallProgress> report, Func<bool> cancelled)
         {

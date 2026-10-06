@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from updater.archive import extract_validated_archive, verify_extracted_release
-from updater.config import MAX_ARCHIVE_BYTES
+from updater.config import MAX_ARCHIVE_BYTES, migrated_update_origin
 from updater.errors import ActivationError, DownloadError, ManifestError, UpdateError
 from updater.locking import update_lock
 from updater.models import ActivationResult, ReleaseManifest, StagedRelease
@@ -60,7 +60,7 @@ def check_for_update(
     now: datetime | None = None,
     opener=None,
 ) -> ReleaseManifest | None:
-    origin = validate_update_origin(base_url)
+    origin = migrated_update_origin(validate_update_origin(base_url))
     try:
         envelope = _request_bytes(origin + "/api/releases/latest", limit=64 * 1024, opener=opener)
     except HTTPError as exc:

@@ -1,5 +1,18 @@
 # 現状と課題
 
+## 2026-10-06: GRAPPs統合Hubへのbridge移行（実装済み・未公開）
+
+- 基点はmain `3a049af7d22f87499eb0ed3cac692667c173c6ba`。評価QAブランチは取り込まない。
+- 通常の署名付きbridge更新を旧 `https://digitalbuilder-gr-updates.rinntyu2000.chatgpt.site` で配信し、適用後の次回更新確認から `https://gr-release-hub.rinntyu2000.chatgpt.site` を使う。リダイレクトで移行しない。新コードの既定配布先と新規Setupの固定hostは新Hub。
+- 更新確認に旧公式originを指定した場合だけ新Hubへ切替。HTTPS既定ポート443も同一扱い。カスタムhost・別ポートは保持。設定・台帳・資格情報・旧インストール先を移行処理で書き換えない。署名検証時の既存active/pendingのoriginは変更せず、失敗時の旧版復旧を維持する。
+- 公開鍵 `release-2026-01`、署名envelope、通番、`Digitalbuilder_GR`製品識別、互換性条件を維持。固定launcherは通常コード更新に含めず、既存の信頼鍵でbridgeと後続更新を検証する。
+- 引継ぎで確認された最新公開版は2.0.4／code sequence 13／installer sequence 13 build 1。次の候補は **2.0.5／code sequence 14／installer sequence 14 build 1（未確定・未公開）**。公開担当が旧・新サイトの最新版と既存番号を再確認し、未使用なら採用する。開発用version.pyはこの作業で変更しない。
+- 合成テストは旧originからのbridge準備、適用失敗・旧版復旧・再試行、新Hubからの後続更新、台帳・設定保持、カスタムorigin保持、署名不正・他製品・同一通番・リダイレクト拒否を確認。テスト内だけの既存一時鍵fixtureを使用し、本番署名秘密鍵の取得・生成・移送や認証変更は行わない。
+- 公開前の残事項: 親担当による差分確認とmain統合、サイト担当によるDigitalbuilder互換 `/api/releases/...` と `/api/installers/...` の直接200応答確認、既存署名環境でのbridge作成、旧originでの通常更新配信と新Hubでの同一製品配信、Windows実機で固定launcherから適用・起動・失敗復旧と新Setupの導入確認。この環境はWindows/C#コンパイラとGUI displayを持たず、公開URLのGETもプロキシ403で拒否された。サイトの200応答やWindows実機動作は未検証。
+- 本番配信・旧Site削除は未実施。KINGOFTIMEの旧URL依存があるため旧Siteを残す。
+- サイト担当との契約: GET `/api/releases/latest`、`/api/releases/{sequence}/manifest`、`/api/releases/{sequence}/download`、`/api/installers/{sequence}/manifest`、`/api/installers/{sequence}/download`。従来の `{key_id,payload,signature}` をそのまま返し、リダイレクトなしのHTTP 200。案内画面は `/digitalbuilder`、管理は `/digitalbuilder/admin`。契約はローカル候補で、本番反映は未実施。
+- クラウド検証: 更新機構17件・Setup builder 4件・手動更新7件の計28件成功、`git diff --check` 成功。全体試験は追加の最終1件を入れる前に457件実行し382件成功、GUI display不在による69 errors/1 failure、旧公開fixture等の5件skip。Windows C#コンパイル・実機起動は未検証。既存の署名改ざん試験が確率的に元の文字と同じ文字へ置換していたため、必ず異なる文字へ置換するよう修正した。
+
 ## 公開版・Git・Windows配布の現状（2026-09-21確認）
 
 - 通常アプリの最新公開版はv2.0.3／code sequence 12。確定ソースは `3568545c2b0edb7a9389cb3bf6f607b6ffc0469a`、公開日は2026年9月9日。署名付きコードZIPは826,533 bytes、SHA-256 `b1ede39df0baf4be7a6cb2d774bab8570f15e3646df26b441c30d43654277be4`。
