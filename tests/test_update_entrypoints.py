@@ -288,9 +288,20 @@ class InstalledUpdateChannelTests(unittest.TestCase):
                     self.assertIsNone(UpdateWindow._default_check_update())
                     self.assertEqual(check.call_args.args[0], origin)
                 self.assertEqual(config.read_text(encoding="utf8"), content)
-            config.write_text('DEFAULT_UPDATE_BASE_URL = dangerous()\n', encoding="utf8")
+            config.unlink()
             with self.assertRaises(ManifestError):
                 installation_update_base_url(root)
+            for content in (
+                'DEFAULT_UPDATE_BASE_URL = dangerous()\n',
+                'DEFAULT_UPDATE_BASE_URL = "https://official.example"\nDEFAULT_UPDATE_BASE_URL = "https://custom.example"\n',
+                'DEFAULT_UPDATE_BASE_URL = "https://official.example"\nif True:\n DEFAULT_UPDATE_BASE_URL = dynamic()\n',
+                'DEFAULT_UPDATE_BASE_URL: str = "https://custom.example"\n',
+                'DEFAULT_UPDATE_BASE_URL = "https://custom.example"\nDEFAULT_UPDATE_BASE_URL += "/path"\n',
+            ):
+                config.write_text(content, encoding="utf8")
+                with self.subTest(content=content), self.assertRaises(ManifestError):
+                    installation_update_base_url(root)
+                self.assertEqual(config.read_text(encoding="utf8"), content)
 
 
 if __name__ == "__main__":

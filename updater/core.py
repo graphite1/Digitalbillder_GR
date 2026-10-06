@@ -27,6 +27,10 @@ HealthcheckCallback = Callable[[Path, str], bool]
 FaultInjector = Callable[[str], None]
 
 
+class _OriginUnavailable(DownloadError):
+    """Transport/HTTP availability failure, distinct from integrity failures."""
+
+
 def _request_bytes(url: str, *, limit: int, opener=None) -> bytes:
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "Digitalbuilder-GR-Updater/1"})
     open_request = opener or urlopen
@@ -45,22 +49,13 @@ def _request_bytes(url: str, *, limit: int, opener=None) -> bytes:
     except UpdateError:
         raise
     except Exception as exc:
-        raise DownloadError("更新サイトからデータを取得できません。") from exc
+        raise _OriginUnavailable("更新サイトからデータを取得できません。") from exc
     if len(data) > limit:
         raise DownloadError("更新データがサイズ上限を超えています。")
     return data
 
 
-def check_for_update(
-    base_url: str,
-    trusted_keys: Mapping[str, str],
-    *,
-    current_sequence: int,
-    runtime_fingerprint: str | None = None,
-    now: datetime | None = None,
-    opener=None,
-) -> ReleaseManifest | None:
-    origin = migrated_update_origin(validate_update_origin(base_url))
+def _fetch_release_envelope(origin: str, *, opener=None) -> bytes | None:
     try:
         envelope = _request_bytes(origin + "/api/releases/latest", limit=64 * 1024, opener=opener)
     except HTTPError as exc:
@@ -78,7 +73,35 @@ def check_for_update(
             pass
         finally:
             exc.close()
-        raise DownloadError("更新情報を取得できません。") from exc
+        raise _OriginUnavailable("更新情報を取得できません。") from exc
+    return envelope
+
+
+def check_for_update(
+    base_url: str,
+    trusted_keys: Mapping[str, str],
+    *,
+    current_sequence: int,
+    runtime_fingerprint: str | None = None,
+    now: datetime | None = None,
+    opener=None,
+) -> ReleaseManifest | None:
+    configured_origin = validate_update_origin(base_url)
+    origin = migrated_update_origin(configured_origin)
+    try:
+        envelope = _fetch_release_envelope(origin, opener=opener)
+    except _OriginUnavailable:
+        if origin == configured_origin:
+            raise
+        envelope = None
+    if envelope is None and origin != configured_origin:
+        # Only installations still configured to the official legacy channel
+        # have this bridge fallback. Never use redirects or a custom origin.
+        # Keep the fallback local to this check; retry the Hub next time.
+        origin = configured_origin
+        envelope = _fetch_release_envelope(origin, opener=opener)
+    if envelope is None:
+        return None
     manifest = verify_release_envelope(
         envelope,
         trusted_keys,

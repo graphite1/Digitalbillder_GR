@@ -192,6 +192,55 @@ class UpdaterTests(unittest.TestCase):
                 opener=lambda *_args, **_kwargs: FakeResponse(self.envelope,
                     LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"))
 
+    def test_bridge_hub_unavailable_falls_back_once_then_retries_hub(self):
+        old_url = LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"
+        new_url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
+        opener = FakeOpener({old_url: self.envelope})
+        manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+        self.assertEqual(opener.urls, [new_url, old_url])
+        self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
+        opener = FakeOpener({new_url: self.envelope})
+        manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+        self.assertEqual(opener.urls, [new_url])
+        self.assertEqual(manifest.base_url, DEFAULT_UPDATE_BASE_URL)
+        for origin in (BASE_URL, DEFAULT_UPDATE_BASE_URL):
+            opener = FakeOpener({old_url: self.envelope})
+            with self.subTest(origin=origin), self.assertRaises(DownloadError):
+                check_for_update(origin, self.keys, current_sequence=0,
+                    runtime_fingerprint=RUNTIME, opener=opener)
+            self.assertEqual(opener.urls, [origin + "/api/releases/latest"])
+        tampered = json.loads(self.envelope)
+        tampered["signature"] = b64url_encode(bytes(64))
+        opener = FakeOpener({new_url: canonical(tampered), old_url: self.envelope})
+        with self.assertRaises(ManifestError):
+            check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+        self.assertEqual(opener.urls, [new_url])
+
+    def test_bridge_empty_hub_checks_legacy_and_legacy_signature_still_required(self):
+        old_url = LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"
+        new_url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
+        urls = []
+        def opener(request, timeout):
+            urls.append(request.full_url)
+            if request.full_url == new_url:
+                raise HTTPError(new_url, 404, "Not Found", {"Content-Type": "application/json"},
+                    io.BytesIO(b'{"error":"no_release"}'))
+            return FakeResponse(self.envelope, old_url)
+        manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+        self.assertEqual(urls, [new_url, old_url])
+        self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
+        damaged = json.loads(self.envelope)
+        damaged["signature"] = b64url_encode(bytes(64))
+        fallback = FakeOpener({old_url: canonical(damaged)})
+        with self.assertRaises(ManifestError):
+            check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                current_sequence=0, runtime_fingerprint=RUNTIME, opener=fallback)
+        self.assertEqual(fallback.urls, [new_url, old_url])
+
     def test_bridge_activation_failure_retry_and_next_hub_update_preserve_data(self):
         data = self.root / "user-data"
         data.mkdir()
