@@ -1,0 +1,55 @@
+name: Linux synthetic QA
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'app.py'
+      - 'launcher.py'
+      - 'invoice_manager/**'
+      - 'updater/**'
+      - 'tests/**'
+      - 'tools/**'
+      - '.github/workflows/linux-synthetic-qa.yml'
+  push:
+    branches: ['cloud/linux-qa-baseline-20261002']
+permissions:
+  contents: read
+concurrency:
+  group: linux-synthetic-qa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, verified 2026-10-02
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /AGENTS.md
+            /.gitignore
+            /README.md
+            /requirements.txt
+            /app.py
+            /launcher.py
+            /invoice_manager/
+            /updater/
+            /tests/
+            /tools/
+            /docs/*.md
+            /.github/
+      - name: Select evaluated Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6, verified 2026-10-02
+        with:
+          python-version: '3.13.5'
+      - name: Install official GUI packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tk xvfb xauth
+      - name: Set up pinned evaluation venv
+        run: PYTHON=python bash tools/cloud/setup_linux.sh
+      - name: Test synthetic data with network disabled
+        run: |
+          sudo unshare --net runuser -u "$(id -un)" -- env PATH="$PATH" \
+            xvfb-run -a .venv/bin/python -B tools/cloud/run_checks.py \
+            --output-dir "$PWD/作業補助/cloud-qa/ci-report"

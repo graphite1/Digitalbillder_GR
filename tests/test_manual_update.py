@@ -57,11 +57,32 @@ class ManualUpdateTests(unittest.TestCase):
             return manual_update.prepare_update(self.root, self.bundle)
 
     def test_installation_rejects_missing_fixed_files_and_database(self) -> None:
-        with self.assertRaises(ValueError):
-            manual_update.installation(self.root / "missing")
+        with patch.dict(manual_update.os.environ, {"DIGITALBUILDER_DATA_DIR": ""}):
+            with self.assertRaises(ValueError):
+                manual_update.installation(self.root / "missing")
+            (self.data / "app.db").unlink()
+            with self.assertRaisesRegex(ValueError, "既存の台帳"):
+                manual_update.installation(self.root)
+
+    def test_installation_uses_configured_database_when_local_database_is_missing(self) -> None:
+        external_data = Path(self.temp.name) / "external-data"
+        external_data.mkdir()
+        with closing(sqlite3.connect(external_data / "app.db")) as connection:
+            connection.execute("CREATE TABLE ledger(id INTEGER PRIMARY KEY)")
+            connection.commit()
         (self.data / "app.db").unlink()
-        with self.assertRaisesRegex(ValueError, "既存の台帳"):
-            manual_update.installation(self.root)
+        with patch.dict(manual_update.os.environ, {"DIGITALBUILDER_DATA_DIR": str(external_data)}):
+            root, data, python = manual_update.installation(self.root)
+        self.assertEqual(root, self.root.resolve())
+        self.assertEqual(data, external_data.resolve())
+        self.assertEqual(python, self.root / ".venv/Scripts/python.exe")
+
+    def test_installation_does_not_fall_back_when_configured_database_is_missing(self) -> None:
+        external_data = Path(self.temp.name) / "missing-external-data"
+        with patch.dict(manual_update.os.environ, {"DIGITALBUILDER_DATA_DIR": str(external_data)}):
+            with self.assertRaisesRegex(ValueError, "既存の台帳"):
+                manual_update.installation(self.root)
+        self.assertTrue((self.data / "app.db").is_file())
 
     def test_prepare_stages_through_existing_trusted_updater(self) -> None:
         with patch.object(updater, "stage_update", wraps=updater.stage_update) as stage, self._trusted()[0], self._trusted()[1], self._trusted()[2]:

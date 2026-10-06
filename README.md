@@ -133,6 +133,8 @@ python app.py
 
 ## 開発時の確認
 
+Linuxクラウドの合成データ検証と固定依存のセットアップは [Linuxクラウド開発・QA](docs/CLOUD_LINUX_QA.md) を参照してください。Codex Cloud環境の作成とWindows実機・署名配布の確認は別工程です。
+
 自動テスト:
 
 ```bash
