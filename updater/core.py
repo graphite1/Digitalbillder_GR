@@ -29,7 +29,7 @@ FaultInjector = Callable[[str], None]
 
 
 class _OriginUnavailable(DownloadError):
-    """Network failure without an HTTP response, never a release-policy signal."""
+    """Network/body-read interruption, excluding HTTP errors and TLS failures."""
 
 
 def _request_bytes(url: str, *, limit: int, opener=None) -> bytes:
@@ -101,7 +101,7 @@ def check_for_update(
         if origin == configured_origin:
             raise
         # Only installations still configured to the official legacy channel
-        # have this network fallback. HTTP responses (including withdrawn or
+        # have this network fallback. HTTP error responses (including withdrawn or
         # empty catalogs) are authoritative and must never revive an old release.
         # Keep the fallback local to this check; retry the Hub next time.
         origin = configured_origin

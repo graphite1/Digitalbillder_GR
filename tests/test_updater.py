@@ -218,6 +218,24 @@ class UpdaterTests(unittest.TestCase):
                     current_sequence=0, runtime_fingerprint=RUNTIME, opener=unavailable)
                 self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
                 self.assertEqual(urls, [new_url, old_url])
+        # An accepted 200/header is not a complete manifest: a body-read
+        # timeout retains the existing network fallback behavior.
+        body_reads = []
+        class InterruptedResponse(FakeResponse):
+            def read(self, size=-1):
+                body_reads.append(size)
+                raise TimeoutError("response body interrupted after headers")
+        urls = []
+        def interrupted(request, timeout):
+            urls.append(request.full_url)
+            if request.full_url == new_url:
+                return InterruptedResponse(self.envelope, new_url)
+            return FakeResponse(self.envelope, old_url)
+        manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+            current_sequence=0, runtime_fingerprint=RUNTIME, opener=interrupted)
+        self.assertEqual(len(body_reads), 1)
+        self.assertEqual(urls, [new_url, old_url])
+        self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
         opener = FakeOpener({new_url: self.envelope})
         manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
             current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
