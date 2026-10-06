@@ -6,11 +6,12 @@ import os
 import secrets
 import shutil
 import sqlite3
+import ssl
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from updater.archive import extract_validated_archive, verify_extracted_release
@@ -28,7 +29,7 @@ FaultInjector = Callable[[str], None]
 
 
 class _OriginUnavailable(DownloadError):
-    """Transport/HTTP availability failure, distinct from integrity failures."""
+    """Network failure without an HTTP response, never a release-policy signal."""
 
 
 def _request_bytes(url: str, *, limit: int, opener=None) -> bytes:
@@ -48,8 +49,14 @@ def _request_bytes(url: str, *, limit: int, opener=None) -> bytes:
         raise
     except UpdateError:
         raise
-    except Exception as exc:
+    except URLError as exc:
+        if isinstance(exc.reason, ssl.SSLError) or not isinstance(exc.reason, OSError):
+            raise DownloadError("更新サイトへの安全な接続を確認できません。") from exc
         raise _OriginUnavailable("更新サイトからデータを取得できません。") from exc
+    except (TimeoutError, ConnectionError) as exc:
+        raise _OriginUnavailable("更新サイトからデータを取得できません。") from exc
+    except Exception as exc:
+        raise DownloadError("更新サイトからデータを取得できません。") from exc
     if len(data) > limit:
         raise DownloadError("更新データがサイズ上限を超えています。")
     return data
@@ -73,7 +80,7 @@ def _fetch_release_envelope(origin: str, *, opener=None) -> bytes | None:
             pass
         finally:
             exc.close()
-        raise _OriginUnavailable("更新情報を取得できません。") from exc
+        raise DownloadError("更新情報を取得できません。") from exc
     return envelope
 
 
@@ -93,10 +100,9 @@ def check_for_update(
     except _OriginUnavailable:
         if origin == configured_origin:
             raise
-        envelope = None
-    if envelope is None and origin != configured_origin:
         # Only installations still configured to the official legacy channel
-        # have this bridge fallback. Never use redirects or a custom origin.
+        # have this network fallback. HTTP responses (including withdrawn or
+        # empty catalogs) are authoritative and must never revive an old release.
         # Keep the fallback local to this check; retry the Hub next time.
         origin = configured_origin
         envelope = _fetch_release_envelope(origin, opener=opener)

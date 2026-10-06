@@ -4,11 +4,12 @@ import hashlib
 import io
 import json
 import sqlite3
+import ssl
 import tempfile
 import unittest
 import zipfile
 from contextlib import closing
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -132,6 +133,8 @@ class FakeOpener:
 
     def __call__(self, request, timeout):
         self.urls.append(request.full_url)
+        if request.full_url not in self.responses:
+            raise URLError(ConnectionRefusedError("synthetic offline origin"))
         return FakeResponse(self.responses[request.full_url], request.full_url)
 
 
@@ -200,6 +203,21 @@ class UpdaterTests(unittest.TestCase):
             current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
         self.assertEqual(opener.urls, [new_url, old_url])
         self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
+        import socket
+        for error in (TimeoutError("timeout"), ConnectionResetError("reset"),
+                      URLError(TimeoutError("wrapped timeout")),
+                      URLError(socket.gaierror("DNS unavailable"))):
+            urls = []
+            def unavailable(request, timeout):
+                urls.append(request.full_url)
+                if request.full_url == new_url:
+                    raise error
+                return FakeResponse(self.envelope, old_url)
+            with self.subTest(error=type(error).__name__):
+                manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                    current_sequence=0, runtime_fingerprint=RUNTIME, opener=unavailable)
+                self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
+                self.assertEqual(urls, [new_url, old_url])
         opener = FakeOpener({new_url: self.envelope})
         manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
             current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
@@ -219,20 +237,35 @@ class UpdaterTests(unittest.TestCase):
                 current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
         self.assertEqual(opener.urls, [new_url])
 
-    def test_bridge_empty_hub_checks_legacy_and_legacy_signature_still_required(self):
+    def test_bridge_http_stop_responses_never_revive_legacy_release(self):
         old_url = LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"
         new_url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
-        urls = []
-        def opener(request, timeout):
-            urls.append(request.full_url)
-            if request.full_url == new_url:
-                raise HTTPError(new_url, 404, "Not Found", {"Content-Type": "application/json"},
-                    io.BytesIO(b'{"error":"no_release"}'))
-            return FakeResponse(self.envelope, old_url)
-        manifest = check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
-            current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
-        self.assertEqual(urls, [new_url, old_url])
-        self.assertEqual(manifest.base_url, LEGACY_OFFICIAL_UPDATE_BASE_URL)
+        for code, body in ((404, b'{"error":"no_release"}'),
+                           (404, b'{"error":"withdrawn"}'),
+                           (410, b'{"error":"withdrawn"}'),
+                           (403, b'{"error":"forbidden"}'),
+                           (429, b'{"error":"rate_limited"}'),
+                           (500, b'{"error":"server_error"}')):
+            urls = []
+            def opener(request, timeout):
+                urls.append(request.full_url)
+                if request.full_url == new_url:
+                    raise HTTPError(new_url, code, "HTTP response", {"Content-Type": "application/json"},
+                        io.BytesIO(body))
+                return FakeResponse(self.envelope, old_url)
+            with self.subTest(code=code, body=body):
+                if code == 404 and body == b'{"error":"no_release"}':
+                    self.assertIsNone(check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                        current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener))
+                else:
+                    with self.assertRaises(DownloadError):
+                        check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                            current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+                self.assertEqual(urls, [new_url])
+
+    def test_bridge_transport_fallback_requires_valid_legacy_signature(self):
+        old_url = LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"
+        new_url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
         damaged = json.loads(self.envelope)
         damaged["signature"] = b64url_encode(bytes(64))
         fallback = FakeOpener({old_url: canonical(damaged)})
@@ -240,6 +273,22 @@ class UpdaterTests(unittest.TestCase):
             check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
                 current_sequence=0, runtime_fingerprint=RUNTIME, opener=fallback)
         self.assertEqual(fallback.urls, [new_url, old_url])
+
+    def test_bridge_tls_and_unknown_errors_do_not_fall_back(self):
+        old_url = LEGACY_OFFICIAL_UPDATE_BASE_URL + "/api/releases/latest"
+        new_url = DEFAULT_UPDATE_BASE_URL + "/api/releases/latest"
+        for error in (URLError(ssl.SSLCertVerificationError("untrusted certificate")),
+                      ssl.SSLError("TLS failure"), URLError("unknown URL failure"), ValueError("bad header")):
+            urls = []
+            def opener(request, timeout):
+                urls.append(request.full_url)
+                if request.full_url == new_url:
+                    raise error
+                return FakeResponse(self.envelope, old_url)
+            with self.subTest(error=type(error).__name__), self.assertRaises(DownloadError):
+                check_for_update(LEGACY_OFFICIAL_UPDATE_BASE_URL, self.keys,
+                    current_sequence=0, runtime_fingerprint=RUNTIME, opener=opener)
+            self.assertEqual(urls, [new_url])
 
     def test_bridge_activation_failure_retry_and_next_hub_update_preserve_data(self):
         data = self.root / "user-data"
