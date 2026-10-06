@@ -80,6 +80,93 @@ def parse_assessment_rows(headers, rows, *, external_id: str | None = None) -> t
     return tuple(lines)
 
 
+# Read each table separately. A progress-statement link table uses the same
+# visible "項目 / 値" headings as invoice fields, but has two physical cells.
+# Only direct rows/cells are collected so nested tables cannot impersonate
+# invoice-field rows. This script reads the rendered DOM and never mutates it.
+INVOICE_ITEM_TABLES_SCRIPT = """tables => tables.filter(table =>
+    Array.from(table.querySelectorAll('th, [role="columnheader"]')).some(cell =>
+        cell.closest('table') === table && (cell.innerText.trim() === '項目'
+            || (cell.getAttribute('aria-label') || '').trim() === '項目'
+            || (cell.getAttribute('aria-labelledby') || '').split(/\\s+/)
+                .map(id => document.getElementById(id)?.textContent || '').join(' ').trim() === '項目')
+    )).map(table => {
+    const headerRows = Array.from(table.children).filter(child => child.tagName === 'THEAD')
+        .flatMap(head => Array.from(head.rows));
+    const headerCells = headerRows.length === 1 ? Array.from(headerRows[0].cells) : [];
+    const rows = Array.from(table.tBodies).flatMap(body => Array.from(body.rows));
+    const preceding = table.previousElementSibling;
+    return {
+        headers: headerCells.map(cell => cell.innerText.trim()),
+        header_row_count: headerRows.length,
+        operation_header_hidden: headerCells.length === 3
+            && headerCells[2].getAttribute('aria-hidden') === 'true',
+        preceding_heading: preceding && /^H[1-6]$/.test(preceding.tagName)
+            ? preceding.innerText.trim() : null,
+        rows: rows.map(row => Array.from(row.cells).map(cell => cell.innerText.trim())),
+        plain_cells: [...headerCells, ...rows.flatMap(row => Array.from(row.cells))]
+            .every(cell => cell.colSpan === 1 && cell.rowSpan === 1
+                && !cell.querySelector('table'))
+    };
+})"""
+INVOICE_IDENTITY_FIELDS = frozenset(("請求日", "発行元企業名", "請求金額 (税込)", "査定合計金額(税込)"))
+PROGRESS_STATEMENT_FIELDS = ("受取方法", "出来高調書URL")
+
+
+def _item_table_error(reason, table, table_number, *, row_number=None, cell_count=None):
+    # Header labels outside this fixed vocabulary, row labels and values are
+    # deliberately not logged: custom fields can contain private information.
+    safe_headers = [
+        label if label in ("項目", "値") else ("空欄" if label == "" else "未確認")
+        for label in table["headers"]
+    ]
+    detail = (f"{reason}、表: {table_number}、列: {'/'.join(safe_headers) or 'なし'}"
+              f"、見出し行数: {table['header_row_count']}、行数: {len(table['rows'])}")
+    if row_number is not None:
+        detail += f"、行: {row_number}、セル数: {cell_count}"
+    return InvoiceReadError(f"請求書項目の構成を確認できません。（{detail}）")
+
+
+def parse_invoice_item_tables(tables) -> dict[str, str]:
+    """Accept invoice fields and one positively identified auxiliary table."""
+    fields = {}
+    auxiliary_seen = False
+    invoice_tables = 0
+    for table_number, table in enumerate(tables, 1):
+        check_cancelled()
+        headers, rows = tuple(table["headers"]), table["rows"]
+        if table["header_row_count"] != 1 or not table["plain_cells"]:
+            raise _item_table_error("未確認の表構造", table, table_number)
+        is_progress_section = table["preceding_heading"] == "出来高調書"
+        if is_progress_section:
+            if (auxiliary_seen or headers != ("項目", "値") or len(rows) != 2
+                    or any(len(row) != 2 for row in rows)
+                    or tuple(row[0] for row in rows) != PROGRESS_STATEMENT_FIELDS):
+                raise _item_table_error("出来高調書の補助表が既知の構成と異なります", table, table_number)
+            auxiliary_seen = True
+            continue
+        if headers != ("項目", "値", "") or not table["operation_header_hidden"]:
+            raise _item_table_error("未確認の項目表", table, table_number)
+        invoice_tables += 1
+        if not rows:
+            raise _item_table_error("請求書項目の表が空です", table, table_number)
+        for row_number, row in enumerate(rows, 1):
+            check_cancelled()
+            if len(row) != 3 or row[2] or not row[0]:
+                raise _item_table_error("項目行が既知の構成と異なります", table, table_number,
+                                        row_number=row_number, cell_count=len(row))
+            if row[0] in fields:
+                raise _item_table_error("請求書項目が重複しています", table, table_number,
+                                        row_number=row_number, cell_count=len(row))
+            fields[row[0]] = row[1]
+    if not invoice_tables or not INVOICE_IDENTITY_FIELDS.issubset(fields):
+        raise InvoiceReadError(
+            f"本人確認用の請求書項目が見つかりません。（項目表: {len(tables)}、"
+            f"請求書項目表: {invoice_tables}、必要項目: {len(INVOICE_IDENTITY_FIELDS & fields.keys())}/4）"
+        )
+    return fields
+
+
 def read_invoice_page(page, external_id: str, *, timeout_ms: int = 30_000) -> WebInvoiceRead:
     """Navigate to one validated ID and inspect the rendered read-only tables."""
     check_cancelled()
@@ -121,12 +208,9 @@ def read_invoice_page(page, external_id: str, *, timeout_ms: int = 30_000) -> We
     if len(project_rows) != 1 or len(project_rows[0]) != 5:
         raise InvoiceReadError("工事情報の構成を確認できません。")
     item_table = panel.get_by_role("table").filter(has=page.get_by_role("columnheader", name="項目", exact=True))
-    pairs = item_table.locator("tbody tr").evaluate_all("rows => rows.map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))")
+    tables = item_table.evaluate_all(INVOICE_ITEM_TABLES_SCRIPT)
     check_cancelled()
-    # The current read-only table has a third, empty operation cell omitted by AX.
-    if any(len(pair) != 3 or pair[2] for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
-        raise InvoiceReadError("請求書項目の構成を確認できません。")
-    fields = {pair[0]: pair[1] for pair in pairs}
+    fields = parse_invoice_item_tables(tables)
     try:
         match = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日(?:\(.+\))?", fields["請求日"])
         if not match:

@@ -60,23 +60,41 @@ class _RoleMarker:
         self.name = name
 
 
+def item_table(rows, *, headers=("項目", "値", ""), heading=None,
+               header_rows=1, operation_hidden=True, plain_cells=True):
+    return {"headers": list(headers), "header_row_count": header_rows,
+            "operation_header_hidden": operation_hidden, "preceding_heading": heading,
+            "rows": [list(row) for row in rows], "plain_cells": plain_cells}
+
+
+class _ItemTablesLocator:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def evaluate_all(self, script):
+        if script != reader.INVOICE_ITEM_TABLES_SCRIPT:
+            raise AssertionError("unexpected item-table extraction script")
+        return self.tables
+
+
 class _TableSelector:
-    def __init__(self, project_rows, item_rows) -> None:
+    def __init__(self, project_rows, item_rows, item_tables=None) -> None:
         self.project_rows = project_rows
         self.item_rows = item_rows
+        self.item_tables = item_tables if item_tables is not None else [item_table(item_rows)]
 
     def filter(self, *, has):
         if has.name == "工事コード":
             return _TextLocator(rows=self.project_rows)
         if has.name == "項目":
-            return _TextLocator(rows=self.item_rows)
+            return _ItemTablesLocator(self.item_tables)
         raise AssertionError(f"unexpected table marker: {has.name}")
 
 
 class _Panel:
-    def __init__(self, headers, assessment_rows, project_rows, item_rows, archived, call_log) -> None:
+    def __init__(self, headers, assessment_rows, project_rows, item_rows, archived, call_log, item_tables=None) -> None:
         self.region = _Region(headers, assessment_rows, call_log)
-        self.tables = _TableSelector(project_rows, item_rows)
+        self.tables = _TableSelector(project_rows, item_rows, item_tables)
         self.archived = archived
 
     def get_by_role(self, role, **kwargs):
@@ -113,6 +131,7 @@ class _ReadOnlyPage:
         rows=None,
         project_rows=None,
         item_rows=None,
+        item_tables=None,
         archived=True,
     ) -> None:
         self.url = reader.ORIGIN
@@ -129,6 +148,7 @@ class _ReadOnlyPage:
             ],
             archived,
             self.calls,
+            item_tables,
         )
 
     def goto(self, url, *, wait_until, timeout):
@@ -454,6 +474,157 @@ class WebInvoiceParserTests(unittest.TestCase):
             with self.subTest(item_rows=item_rows), self.assertRaisesRegex(reader.InvoiceReadError, "請求書項目"):
                 reader.read_invoice_page(_ReadOnlyPage(item_rows=item_rows), external_id)
 
+
+
+class InvoiceItemTableScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = [
+            ["請求日", "2026年9月5日(金)", ""],
+            ["発行元企業名", "架空建設株式会社", ""],
+            ["請求金額 (税込)", "¥1,100", ""],
+            ["査定合計金額(税込)", "￥1,100", ""],
+        ]
+        self.aux_rows = [["受取方法", "直接入力"], ["出来高調書URL", "https://example.invalid/synthetic"]]
+
+    def main(self, rows=None, **kwargs):
+        return item_table(self.rows if rows is None else rows, **kwargs)
+
+    def aux(self, rows=None, **kwargs):
+        return item_table(self.aux_rows if rows is None else rows,
+                          headers=kwargs.pop("headers", ("項目", "値")),
+                          heading=kwargs.pop("heading", "出来高調書"), **kwargs)
+
+    def read(self, tables):
+        return reader.read_invoice_page(_ReadOnlyPage(item_tables=tables), str(uuid4()))
+
+    def assert_bad(self, tables, reason):
+        with self.assertRaisesRegex(reader.InvoiceReadError, reason):
+            self.read(tables)
+
+    def test_invoice_and_official_progress_statement_auxiliary_are_separate(self):
+        result = self.read([self.main(), self.aux()])
+        self.assertEqual(result.invoice_amount, 1_100)
+        self.assertEqual(result.vendor_name, "架空建設株式会社")
+        self.assertTrue(result.archived)
+
+    def test_invoice_split_around_auxiliary_table_preserves_all_fields(self):
+        result = self.read([self.main(self.rows[:2]), self.aux(), self.main(self.rows[2:])])
+        self.assertEqual(result.invoice_date, "2026-09-05")
+        self.assertEqual(result.invoice_amount, 1_100)
+
+    def test_regular_invoice_without_auxiliary_still_succeeds(self):
+        self.assertEqual(self.read([self.main()]).invoice_amount, 1_100)
+
+    def test_unknown_two_column_table_is_not_skipped(self):
+        self.assert_bad([self.main(), item_table([["未知", "値"]], headers=("項目", "値"))], "未確認の項目表")
+
+    def test_auxiliary_rows_without_exact_heading_are_not_skipped(self):
+        for heading in (None, "別の見出し", "出来高調書（変更）"):
+            with self.subTest(heading=heading):
+                self.assert_bad([self.main(), self.aux(heading=heading)], "未確認の項目表")
+
+    def test_auxiliary_heading_with_new_third_column_fails(self):
+        self.assert_bad([self.main(), self.aux([row + [""] for row in self.aux_rows],
+                        headers=("項目", "値", ""))], "補助表")
+
+    def test_auxiliary_changed_row_label_fails(self):
+        self.assert_bad([self.main(), self.aux([["別の項目", "値"], self.aux_rows[1]])], "補助表")
+
+    def test_auxiliary_missing_extra_or_reordered_rows_fail(self):
+        for rows in (self.aux_rows[:1], self.aux_rows + [["余分", "値"]],
+                     list(reversed(self.aux_rows))):
+            with self.subTest(rows=rows):
+                self.assert_bad([self.main(), self.aux(rows)], "補助表")
+
+    def test_auxiliary_malformed_cell_count_fails(self):
+        self.assert_bad([self.main(), self.aux([["受取方法"], self.aux_rows[1]])], "補助表")
+
+    def test_duplicate_auxiliary_tables_fail(self):
+        self.assert_bad([self.main(), self.aux(), self.aux()], "補助表")
+
+    def test_missing_required_field_fails(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                self.assert_bad([self.main(self.rows[:index] + self.rows[index + 1:]), self.aux()], "本人確認用")
+
+    def test_duplicate_invoice_field_across_tables_fails(self):
+        self.assert_bad([self.main(), self.main([self.rows[0]])], "重複")
+
+    def test_duplicate_unknown_invoice_field_also_fails(self):
+        rows = self.rows + [["自由欄", "一", ""], ["自由欄", "二", ""]]
+        self.assert_bad([self.main(rows)], "重複")
+
+    def test_empty_item_label_fails(self):
+        self.assert_bad([self.main(self.rows + [["", "値", ""]])], "項目行")
+
+    def test_nonempty_operation_cell_still_fails(self):
+        self.assert_bad([self.main([self.rows[0][:2] + ["編集"], *self.rows[1:]])], "項目行")
+
+    def test_malformed_invoice_cells_still_fail(self):
+        self.assert_bad([self.main([self.rows[0][:2], *self.rows[1:]])], "セル数: 2")
+
+    def test_empty_or_absent_main_tables_fail(self):
+        self.assert_bad([self.main([])], "空")
+        self.assert_bad([self.aux()], "本人確認用")
+        self.assert_bad([], "本人確認用")
+
+    def test_unknown_headers_or_operation_visibility_fail(self):
+        for kwargs in ({"headers": ("項目", "変更", "")}, {"headers": ("項目", "値", "新列")},
+                       {"operation_hidden": False}):
+            with self.subTest(kwargs=kwargs):
+                self.assert_bad([self.main(**kwargs)], "未確認の項目表")
+
+    def test_multiple_missing_header_rows_or_nested_spanning_cells_fail(self):
+        for kwargs in ({"header_rows": 0}, {"header_rows": 2}, {"plain_cells": False}):
+            with self.subTest(kwargs=kwargs):
+                self.assert_bad([self.main(**kwargs)], "未確認の表構造")
+
+    def test_auxiliary_with_nested_or_spanning_cells_fails(self):
+        self.assert_bad([self.main(), self.aux(plain_cells=False)], "未確認の表構造")
+
+    def test_amount_consistency_validation_is_preserved(self):
+        rows = [*self.rows[:-1], ["査定合計金額(税込)", "¥1,101", ""]]
+        self.assert_bad([self.main(rows), self.aux()], "税込合計")
+
+    def test_identity_validation_is_preserved(self):
+        result = self.read([self.main(), self.aux()])
+        with self.assertRaisesRegex(reader.InvoiceReadError, "一致しません"):
+            reader.verify_identity(result, external_id=result.external_id, project_code="P-FAKE",
+                                   vendor_name="別会社", invoice_date=result.invoice_date,
+                                   invoice_amount=result.invoice_amount)
+
+    def test_cancellation_during_item_table_parse_is_preserved(self):
+        token = CancellationToken()
+        token.request()
+        with self.assertRaises(OperationCancelled), cancellation_scope(token):
+            reader.parse_invoice_item_tables([self.main(), self.aux()])
+
+    def test_diagnostic_has_structure_but_no_custom_labels_values_or_urls(self):
+        private = "PRIVATE-NAME-SHOULD-NOT-APPEAR"
+        secret_value = "PRIVATE-VALUE-SHOULD-NOT-APPEAR"
+        table = self.main([[private, secret_value, "https://private.invalid/secret"]],
+                          headers=("項目", private, ""))
+        with self.assertRaises(reader.InvoiceReadError) as caught:
+            self.read([table])
+        message = str(caught.exception)
+        self.assertIn("表: 1", message)
+        self.assertIn("列: 項目/未確認/空欄", message)
+        self.assertIn("行数: 1", message)
+        for forbidden in (private, secret_value, "private.invalid"):
+            self.assertNotIn(forbidden, message)
+
+    def test_row_diagnostic_has_index_and_count_without_values(self):
+        rows = self.rows + [["PRIVATE-LABEL", "PRIVATE-VALUE"]]
+        with self.assertRaises(reader.InvoiceReadError) as caught:
+            self.read([self.main(rows)])
+        self.assertIn("行: 5、セル数: 2", str(caught.exception))
+        self.assertNotIn("PRIVATE", str(caught.exception))
+
+    def test_auxiliary_diagnostic_does_not_log_unknown_label_or_value(self):
+        with self.assertRaises(reader.InvoiceReadError) as caught:
+            self.read([self.main(), self.aux([["PRIVATE-LABEL", "PRIVATE-VALUE"], self.aux_rows[1]])])
+        self.assertIn("表: 2", str(caught.exception))
+        self.assertNotIn("PRIVATE", str(caught.exception))
 
 class ArchivedHistorySyncTests(unittest.TestCase):
     def setUp(self) -> None:
