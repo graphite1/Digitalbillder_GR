@@ -272,5 +272,26 @@ class UpdateWindowPolicyTests(unittest.TestCase):
         self.assertEqual((APP_VERSION, RELEASE_SEQUENCE), ("2.0.3", 12))
 
 
+class InstalledUpdateChannelTests(unittest.TestCase):
+    def test_active_release_uses_fixed_installation_channel_without_rewriting_it(self):
+        from updater.config import LEGACY_OFFICIAL_UPDATE_BASE_URL, installation_update_base_url
+        from updater.errors import ManifestError
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "updater" / "config.py"
+            config.parent.mkdir()
+            for origin in (LEGACY_OFFICIAL_UPDATE_BASE_URL, "https://custom.example.test"):
+                content = f'DEFAULT_UPDATE_BASE_URL = {origin!r}\nraise RuntimeError("must not execute")\n'
+                config.write_text(content, encoding="utf8")
+                with patch.object(UpdateWindow, "_install_root", return_value=root), \
+                     patch("updater.core.check_for_update", return_value=None) as check:
+                    self.assertIsNone(UpdateWindow._default_check_update())
+                    self.assertEqual(check.call_args.args[0], origin)
+                self.assertEqual(config.read_text(encoding="utf8"), content)
+            config.write_text('DEFAULT_UPDATE_BASE_URL = dangerous()\n', encoding="utf8")
+            with self.assertRaises(ManifestError):
+                installation_update_base_url(root)
+
+
 if __name__ == "__main__":
     unittest.main()

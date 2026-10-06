@@ -234,14 +234,14 @@ class UpdateWindow(tk.Toplevel):
         configured = os.environ.get(INSTALL_ROOT_ENV, "").strip()
         return Path(configured).expanduser().resolve() if configured else Path(__file__).resolve().parents[2]
 
-    @staticmethod
-    def _default_check_update():
-        from updater.config import DEFAULT_UPDATE_BASE_URL, TRUSTED_PUBLIC_KEYS
+    @classmethod
+    def _default_check_update(cls):
+        from updater.config import installation_update_base_url, TRUSTED_PUBLIC_KEYS
         from updater.core import check_for_update
         from updater.runtime import get_runtime_fingerprint
 
         return check_for_update(
-            DEFAULT_UPDATE_BASE_URL,
+            installation_update_base_url(cls._install_root()),
             TRUSTED_PUBLIC_KEYS,
             current_sequence=RELEASE_SEQUENCE,
             runtime_fingerprint=get_runtime_fingerprint(),

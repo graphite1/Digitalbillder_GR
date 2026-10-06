@@ -4,6 +4,38 @@ LEGACY_OFFICIAL_UPDATE_BASE_URL = "https://digitalbuilder-gr-updates.rinntyu2000
 DEFAULT_UPDATE_BASE_URL = "https://gr-release-hub.rinntyu2000.chatgpt.site"
 
 
+def installation_update_base_url(install_root) -> str:
+    """Read the fixed installation's public channel without executing its code.
+
+    Code-only updates replace the release config, not the fixed installation.
+    Preserve a locally selected custom channel there instead of resetting it to
+    the new release's default. Origin validation/migration happens at check time.
+    """
+    import ast
+    from pathlib import Path
+    from updater.errors import ManifestError
+
+    path = Path(install_root) / "updater" / "config.py"
+    if not path.exists():
+        return DEFAULT_UPDATE_BASE_URL
+    try:
+        if path.stat().st_size > 64 * 1024:
+            raise ValueError("configuration too large")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "DEFAULT_UPDATE_BASE_URL"
+                for target in node.targets
+            ):
+                value = ast.literal_eval(node.value)
+                if isinstance(value, str):
+                    return value
+                break
+    except (OSError, ValueError, SyntaxError, UnicodeError) as exc:
+        raise ManifestError("インストール先の更新URL設定を確認できません。") from exc
+    raise ManifestError("インストール先の更新URL設定を確認できません。")
+
+
 def migrated_update_origin(origin: str) -> str:
     """Move only the official legacy channel after this signed code is active.
 
